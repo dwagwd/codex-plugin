@@ -1,6 +1,6 @@
 {
   "name": "codex-usage-widget",
-  "version": "0.3.1+codex.20260912095742",
+  "version": "0.3.1+codex.20260912100350",
   "description": "Native macOS widget for Codex plan quota, account token rates, and reset countdowns.",
   "author": {
     "name": "Codex Usage Widget contributors"
