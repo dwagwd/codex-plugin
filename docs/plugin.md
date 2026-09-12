@@ -6,4 +6,4 @@ The checkout contains `.codex-plugin/plugin.json` and `skills/usage-widget/SKILL
 
 The launch skill runs the bundled `scripts/launch.sh`, which builds/installs the companion only if it is missing. To update the installed app after changing source, run `scripts/build-install.sh` explicitly.
 
-Public repository/marketplace registration depends on the repository URL chosen by the maintainer. No GitHub owner or public marketplace URL is embedded in this source package. See [official plugin documentation](https://learn.chatgpt.com/docs/plugins) for current packaging and distribution options.
+The public source repository is [dwagwd/codex-plugin](https://github.com/dwagwd/codex-plugin). It is not listed in an official curated marketplace. Use the standalone installation above or register your local checkout through the plugin-creator flow. See [official plugin documentation](https://learn.chatgpt.com/docs/plugins) for current packaging and distribution options.

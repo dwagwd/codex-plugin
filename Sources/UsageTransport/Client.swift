@@ -92,7 +92,7 @@ public final class UsageClient {
             try p.run()
             armTimeout()
             send(["id": 1, "method": "initialize", "params": [
-                "clientInfo": ["name": "codex_usage_widget", "version": "0.2.0"],
+                "clientInfo": ["name": "codex_usage_widget", "version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"],
                 "capabilities": ["experimentalApi": true]]])
         } catch { fail("startFailed") }
     }

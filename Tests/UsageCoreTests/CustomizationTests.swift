@@ -11,6 +11,15 @@ final class CustomizationTests: XCTestCase {
         XCTAssertFalse(value.options.customColors)
         XCTAssertFalse(value.options.bridges)
     }
+    func testInvalidQuotaPercentagesAreUnavailable() {
+        for value in [Double.nan, .infinity, -1, 101] {
+            XCTAssertNil(QuotaWindow(usedPercent: value, windowDurationMins: 60, resetsAt: nil).validUsedPercent)
+        }
+        for value in [0.0, 20.5, 100] {
+            XCTAssertEqual(QuotaWindow(usedPercent: value, windowDurationMins: 60, resetsAt: nil).validUsedPercent, value)
+        }
+        XCTAssertNil(QuotaWindow(usedPercent: nil, windowDurationMins: nil, resetsAt: nil).validUsedPercent)
+    }
     func testColorBoundsAndOptionsRoundTrip() throws {
         var value = WidgetSettings()
         value.options.multiple = true

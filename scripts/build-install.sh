@@ -7,7 +7,7 @@ APP="$DIST_DIR/Codex Usage Widget.app"
 mkdir -p "$HOME/Applications"
 # Quit this app gracefully before replacing its executable.
 if pgrep -x CodexUsageWidget >/dev/null; then
-    "$HOME/Applications/Codex Usage Widget.app/Contents/MacOS/CodexUsageWidget" --quit
+    "$APP/Contents/MacOS/CodexUsageWidget" --quit
     for attempt in {1..30}; do
         if ! pgrep -x CodexUsageWidget >/dev/null; then break; fi
         sleep 0.1

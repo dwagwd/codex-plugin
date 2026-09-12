@@ -171,6 +171,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func providerFor(_ item: WindowItem) -> String? {
         ["claude", "antigravity", "cursor"].first { item.id.hasPrefix($0 + ":") }
     }
+    private func sourceUpdate(for item: WindowItem) -> Date? {
+        guard let provider = providerFor(item) else { return lastUpdate }
+        return bridgeSnapshots[provider].map { Date(timeIntervalSince1970: $0.updatedAt) }
+    }
     private func isStale(_ item: WindowItem, now: Double) -> Bool {
         guard let provider = providerFor(item) else { return stale }
         guard let snapshot = bridgeSnapshots[provider] else { return true }
@@ -357,8 +361,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let planRate = item.flatMap { cachedRates[$0.id] }
         let tokenRate = cachedTokenRate
         let tokenStale = stale || !tokenAvailable || (tokenUpdated.map { Date().timeIntervalSince($0) > self.client.pollInterval + 30 } ?? true)
-        let planUnavailable = itemStale || item?.window.usedPercent == nil || (item?.window.resetsAt.map { $0 <= now } ?? false)
-        resetLabel.stringValue = itemStale ? (lastUpdate == nil ? l.text(errorMessage ?? "connecting") : l.text("stale") + " · " + l.countdown(item?.window.resetsAt, now: now)) :
+        let sourceUpdated = item.flatMap { sourceUpdate(for: $0) }
+        let sourceError = item.flatMap { providerFor($0) } == nil ? errorMessage : nil
+        let planUnavailable = itemStale || item?.window.validUsedPercent == nil || (item?.window.resetsAt.map { $0 <= now } ?? false)
+        resetLabel.stringValue = itemStale ? (sourceUpdated == nil ? l.text(sourceError ?? "connecting") : l.text("stale") + " · " + l.countdown(item?.window.resetsAt, now: now)) :
             (item?.window.resetsAt.map { $0 > now } ?? false ? l.text("reset") + " " : "") + l.countdown(item?.window.resetsAt, now: now)
         rateLabel.stringValue = rateText(planRate, metric: "quota", unavailable: planUnavailable)
         tokenLabel.stringValue = "Codex · " + rateText(tokenRate, metric: "tokens", unavailable: tokenStale)
@@ -368,17 +374,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         observationLabel.stringValue = l.text("last") + " \(settings.intervalValue) " + l.unit(settings.intervalUnit, short: true) + (partial ? " · " + l.text("estimate") : "")
         let formatter = dateFormatter; formatter.locale = l.locale; formatter.dateStyle = .medium; formatter.timeStyle = .medium
         let resetDate = item?.window.resetsAt.map { formatter.string(from: Date(timeIntervalSince1970: $0)) } ?? l.text("unknown")
-        let updated = lastUpdate.map { formatter.string(from: $0) } ?? l.text("unavailable")
-        let detail = "\(valueLabel.stringValue) · \(item.map { title(for: $0) } ?? "Codex")\n\(l.text("reset")): \(resetDate)\n\(rateLabel.stringValue)\n\(tokenLabel.stringValue)\n\(observationLabel.stringValue)\n\(l.text("updated")): \(updated)" + (errorMessage.map { "\n"+l.text($0) } ?? "")
+        let updated = sourceUpdated.map { formatter.string(from: $0) } ?? l.text("unavailable")
+        let detail = "\(valueLabel.stringValue) · \(item.map { title(for: $0) } ?? "Codex")\n\(l.text("reset")): \(resetDate)\n\(rateLabel.stringValue)\n\(tokenLabel.stringValue)\n\(observationLabel.stringValue)\n\(l.text("updated")): \(updated)" + (sourceError.map { "\n"+l.text($0) } ?? "")
         panel.contentView?.toolTip = detail; valueLabel.toolTip = detail; resetLabel.toolTip = detail
         rateLabel.toolTip = detail + "\n" + l.text("quotaHelp") + observedDetail(planRate)
         tokenLabel.toolTip = detail + "\n" + l.text("tokensHelp") + observedDetail(tokenRate)
         status?.button?.toolTip = detail
         for (index, extra) in extraItems.enumerated() where index < extraLabels.count {
             let old = isStale(extra, now: now)
-            let percent = extra.window.usedPercent.map { l.number($0, decimals: 0) + "%" } ?? "—"
+            let percent = extra.window.validUsedPercent.map { l.number($0, decimals: 0) + "%" } ?? "—"
             let line = title(for: extra) + " · " + percent
-            let rate = rateText(cachedRates[extra.id], metric: "quota", unavailable: old || (extra.window.resetsAt.map { $0 <= now } ?? false))
+            let rate = rateText(cachedRates[extra.id], metric: "quota", unavailable: old || extra.window.validUsedPercent == nil || (extra.window.resetsAt.map { $0 <= now } ?? false))
             extraLabels[index].stringValue = line + "\n" + rate + "\n" + (old ? l.text("stale") + " · " : "") + l.countdown(extra.window.resetsAt, now: now)
             extraLabels[index].toolTip = extraLabels[index].stringValue + "\n" + l.text("quotaHelp")
         }
@@ -416,11 +422,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         data["energySaver"] = settings.options.energySaver
         data["enabledBridges"] = settings.options.bridges
         data["selectedWindow"] = current?.id
-        data["usedPercent"] = current?.window.usedPercent
+        data["usedPercent"] = current?.window.validUsedPercent
         data["resetsAt"] = current?.window.resetsAt
         data["lastUpdate"] = lastUpdate?.timeIntervalSince1970
-        data["errorCode"] = errorMessage
-        data["error"] = errorMessage.map { l.text($0) }
+        let sourceError = current.flatMap { providerFor($0) } == nil ? errorMessage : nil
+        data["errorCode"] = sourceError
+        data["error"] = sourceError.map { l.text($0) }
+        data["codexErrorCode"] = errorMessage
         data["language"] = settings.language.rawValue
         data["observationSeconds"] = settings.lookback
         data["rateUnit"] = settings.rateUnit.rawValue
@@ -428,7 +436,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let current, let provider = providerFor(current) { data["lastUpdate"] = bridgeSnapshots[provider]?.updatedAt }
         data["tokenRatePerHour"] = stale || !tokenAvailable ? nil : tokenHistory.rate(now: Date().timeIntervalSince1970, lookback: settings.lookback)?.perHour
         data["tokenAvailable"] = tokenAvailable
-        data["ratePerHour"] = current.flatMap { isStale($0, now: Date().timeIntervalSince1970) ? nil : cachedRates[$0.id]?.perHour }
+        data["ratePerHour"] = current.flatMap { (isStale($0, now: Date().timeIntervalSince1970) || ($0.window.resetsAt.map { $0 <= Date().timeIntervalSince1970 } ?? false)) ? nil : cachedRates[$0.id]?.perHour }
         data["planRatePerHour"] = data["ratePerHour"]
         if let bytes = try? JSONSerialization.data(withJSONObject: data, options: [.prettyPrinted, .sortedKeys]) {
             try? bytes.write(to: support.appendingPathComponent("status.json"), options: .atomic)

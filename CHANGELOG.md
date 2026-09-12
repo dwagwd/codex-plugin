@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1 — First public source release
+
+- Correct provider-specific freshness/tooltips and suppress unrelated Codex errors on other providers.
+- Reject invalid percentages consistently and hide expired quota rates in status snapshots.
+- Support reinstalling when the existing app runs from a different location.
+- Report the actual app version during app-server initialization.
+- Publish source installation instructions, checksums, and the release audit scope.
+
 ## 0.3.0
 
 - Ten interface languages plus automatic system selection.

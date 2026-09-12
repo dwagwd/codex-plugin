@@ -5,6 +5,10 @@ public struct QuotaWindow: Codable, Equatable {
     public let usedPercent: Double?
     public let windowDurationMins: Int?
     public let resetsAt: Double?
+    public var validUsedPercent: Double? {
+        guard let usedPercent, usedPercent.isFinite, (0...100).contains(usedPercent) else { return nil }
+        return usedPercent
+    }
 }
 public struct Bucket: Codable {
     public let limitId: String?

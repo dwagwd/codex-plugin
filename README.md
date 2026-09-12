@@ -24,7 +24,14 @@ Unofficial community project. Not affiliated with or endorsed by OpenAI, Anthrop
 
 Requirements: macOS 13+, Swift 5.9+ / Xcode Command Line Tools, Python 3 for tests and packaging, and Codex desktop or CLI signed in with a ChatGPT account. The core Codex app is native and does not require Python; optional provider bridges use Python 3.
 
-From the project checkout:
+Download the source ZIP from [Releases](https://github.com/dwagwd/codex-plugin/releases/latest), extract it, and open a terminal in the extracted `codex-usage-widget` folder. Or clone the repository:
+
+```sh
+git clone https://github.com/dwagwd/codex-plugin.git codex-usage-widget
+cd codex-usage-widget
+```
+
+Then build and launch:
 
 ```sh
 ./scripts/check.sh
@@ -76,4 +83,4 @@ To remove: quit the widget, remove its app, optionally remove its local data and
 
 ## Status
 
-Version 0.3.0 is prepared for source distribution. The repository is currently private; making it public and publishing releases are separate manual decisions. CI runs on pushes, including private-repository pushes. See [validation scope](docs/validation.md) for local checks and limitations.
+Version 0.3.1 is the first public **source release**, under MIT. Codex is the live-tested provider. Optional Claude/Antigravity/Cursor bridges are experimental and fixture-tested; see their support boundaries before setup. Published releases include a source ZIP and SHA-256 checksums. Prebuilt unnotarized apps are not attached to the public release; build locally using the steps above. CI tests and builds on macOS 14 and 15. See [validation scope](docs/validation.md) for local checks and limitations.

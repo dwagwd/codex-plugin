@@ -21,6 +21,8 @@
 
 需要 macOS 13+、Swift 5.9+／Xcode Command Line Tools、測試用 Python 3，以及已登入 ChatGPT 帳號的 Codex App 或 CLI。Codex 核心小卡不依賴 Python，其他 agent 橋接需要 Python 3。
 
+先從 [Releases](https://github.com/dwagwd/codex-plugin/releases/latest) 下載來源 ZIP 並解壓，於資料夾開啟終端機；或先執行 `git clone https://github.com/dwagwd/codex-plugin.git codex-usage-widget`，再 `cd codex-usage-widget`。
+
 ```sh
 ./scripts/check.sh
 ./scripts/build-install.sh
@@ -39,7 +41,7 @@ Codex 額度來自 `account/rateLimits/read`，tokens 來自 `account/usage/read
 
 ## 開源準備
 
-採 MIT。包含貢獻、安全回報、隱私、變更記錄、CI、手動打包 workflow 與來源匯出檢查。目前 GitHub 維持私人，不自動建立公開 release。App 為本機 ad-hoc 簽章，尚未公證。
+採 MIT。包含貢獻、安全回報、隱私、變更記錄、CI、手動打包 workflow 與來源匯出檢查。v0.3.1 為首個公開原始碼版本，附來源 ZIP 與 SHA-256 校驗碼。App 尚未公證，因此公開 release 不附預先編譯的 App，請依上述步驟在本機建置。Codex 已實測；其他 agent 橋接仍屬實驗性功能，通過資料格式測試但尚未完成真實帳號驗證。
 
 ```sh
 ./scripts/package.sh

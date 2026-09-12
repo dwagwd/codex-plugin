@@ -11,11 +11,11 @@
 
 ## Before first public launch
 
-- The source repository is `dwagwd/codex-plugin`. Keep it private until the maintainer explicitly requests public visibility. Pushes and CI do not imply authorization to publish.
+- The public source repository is `dwagwd/codex-plugin`. Publishing a release requires maintainer authorization, a tested commit, and reviewed release assets.
 - Enable GitHub private vulnerability reporting and configure branch protection after CI is available.
 - Verify GitHub Actions on the chosen repository; local validation does not mean hosted CI has passed.
 - Review the license, project description, screenshots, and source archive for personal data.
-- Choose whether to distribute source only or arrange Apple signing/notarization for downloadable binaries. Current packages are ad-hoc signed and not notarized.
+- The first public release is source-only. Do not upload the locally built ad-hoc-signed App ZIP as a ready-to-install release asset. Apple signing/notarization and download-install testing are prerequisites for official prebuilt binaries.
 
 ## Publication
 

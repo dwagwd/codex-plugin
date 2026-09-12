@@ -1,10 +1,10 @@
 # Validation scope
 
-Version 0.3.0 is tested locally on Apple Silicon macOS with Swift 6.2.4 and Codex CLI 0.153.4. The package declares macOS 13+ / Swift 5.9+; minimum-supported OS/compiler combinations have not all been exercised.
+Version 0.3.1 is tested locally on Apple Silicon macOS with Swift 6.2.4 and Codex CLI 0.153.4. The package declares macOS 13+ / Swift 5.9+; minimum-supported OS/compiler combinations have not all been exercised.
 
 ## Automated
 
-`./scripts/check.sh` runs 25 Swift tests and 6 Python bridge tests. These cover hourly/rolling rates, idle time, independent token counters, observation bounds, resets, missing values, account/plan changes, gaps, legacy preferences/history, RGB bounds, complete translation keys, provider timestamps/identity, normalized provider quota fields, exact Cursor member matching, private atomic snapshot writes, status-line preservation/idempotence, protocol failures, token endpoint compatibility, and managed subprocess cleanup. Source export hygiene rejects likely credentials and machine-specific paths without printing matched values.
+`./scripts/check.sh` runs 26 Swift tests and 7 Python bridge/installer tests. These cover hourly/rolling rates, idle time, independent token counters, observation bounds, resets, missing values, account/plan changes, gaps, legacy preferences/history, RGB bounds, complete translation keys, provider timestamps/identity, normalized provider quota fields, exact Cursor member matching, private atomic snapshot writes, status-line preservation/idempotence, protocol failures, token endpoint compatibility, and managed subprocess cleanup. Source export hygiene rejects likely credentials and machine-specific paths without printing matched values.
 
 ## Manual
 
@@ -28,3 +28,9 @@ Observed on the development Mac over 60.1 seconds with energy saver enabled, thr
 | Managed Codex app-server | 67.4 MiB | 0.05% of one core |
 
 CPU was calculated from process CPU-time differences divided by elapsed wall time; resident memory was sampled every ten seconds. This short sample may not include a full 120-second polling cycle, and startup/network bursts can be higher. These figures do not establish a controlled before/after speedup.
+
+## First public release review
+
+The release review covered transport lifecycle and read-only requests, account/window separation, bridge normalization and bounded input, settings persistence, source packaging, installation scripts, repository history, and public documentation. It corrected cross-provider freshness/error labels, inconsistent invalid percentage display, expired diagnostic rates, an old hardcoded protocol client version, and reinstall behavior when the app was launched from a different path. No model turns or credential-file reads are used by the widget.
+
+The source distribution is the supported public artifact. Prebuilt App binaries remain local ad-hoc builds and are not attached to the public release. This is a functional/code review with automated checks, not a claim of exhaustive security certification. Provider live-account and hardware limitations above remain applicable.
