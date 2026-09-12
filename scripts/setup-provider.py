@@ -2,6 +2,8 @@
 """Install a status-line bridge while retaining the user's current status line command."""
 import argparse
 import json
+import os
+import tempfile
 from pathlib import Path
 import shlex
 import shutil
@@ -14,7 +16,7 @@ def main():
     parser.add_argument("provider", choices=["claude", "antigravity"])
     args = parser.parse_args()
     base = Path.home() / (".claude" if args.provider == "claude" else ".gemini/antigravity-cli")
-    base.mkdir(parents=True, exist_ok=True)
+    base.mkdir(parents=True, exist_ok=True, mode=0o700)
     config = base / "settings.json"
     data = json.loads(config.read_text()) if config.exists() else {}
     old = data.get("statusLine") or {}
@@ -43,11 +45,18 @@ else:
 '''.replace("PROVIDER", repr(args.provider)).replace("ORIGINAL", repr(old.get("command"))))
     if config.exists():
         backup = base / ("settings.json.usage-widget-backup-" + str(time.time_ns()))
-        shutil.copy2(config, backup); backup.chmod(0o600)
+        backup_fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(backup_fd, "wb") as output:
+            output.write(config.read_bytes())
     data["statusLine"] = {**old, "type": "command", "command": command}
-    temporary = config.with_suffix(".usage-widget.tmp")
-    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-    temporary.chmod(0o600); temporary.replace(config)
+    fd, temporary = tempfile.mkstemp(prefix=".usage-widget-", dir=base)
+    try:
+        with os.fdopen(fd, "w") as output:
+            output.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+        os.replace(temporary, config)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
     print("Bridge installed. Enable ‘Import other agents’ in widget Settings. Existing status line preserved.")
 
 if __name__ == "__main__":

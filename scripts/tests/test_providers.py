@@ -52,7 +52,12 @@ class ProviderTests(unittest.TestCase):
             installed = json.loads(config.read_text())
             self.assertTrue(installed['unrelated'])
             self.assertEqual(installed['statusLine']['padding'], 2)
-            self.assertEqual(len(list(base.glob('settings.json.usage-widget-backup-*'))), 1)
+            backups = list(base.glob('settings.json.usage-widget-backup-*'))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
+            self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(json.loads(backups[0].read_text()), original)
+            self.assertEqual(list(base.glob('.usage-widget-*')), [])
             result = subprocess.run(installed['statusLine']['command'], shell=True, env=env,
                 input=json.dumps({'session_id': 'test'}), text=True, capture_output=True, check=True)
             self.assertEqual(result.stdout, 'original-status')

@@ -5,6 +5,7 @@
 - Correct provider-specific freshness/tooltips and suppress unrelated Codex errors on other providers.
 - Reject invalid percentages consistently and hide expired quota rates in status snapshots.
 - Support reinstalling when the existing app runs from a different location.
+- Create provider settings backups and temporary files with private permissions from the outset.
 - Report the actual app version during app-server initialization.
 - Publish source installation instructions, checksums, and the release audit scope.
 
