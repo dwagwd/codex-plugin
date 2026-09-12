@@ -1,0 +1,26 @@
+name: Bug report
+description: Report a reproducible widget problem.
+body:
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: macOS, widget, and Codex CLI versions
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Do not upload auth files, account identifiers, usage histories, or conversation content. Redact screenshots.

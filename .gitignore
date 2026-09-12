@@ -1,0 +1,29 @@
+# Build and local state
+.build/
+.swiftpm/
+dist/
+local-validation/
+.DS_Store
+*.xcuserstate
+xcuserdata/
+# Never publish credentials or observed user data
+.env
+.env.*
+!.env.example
+auth.json
+config.toml
+history.json
+tokens.json
+status.json
+*.jsonl
+*.log
+*.pem
+*.key
+__pycache__/
+*.pyc
+
+# Optional provider runtime data and settings backups
+claude.json
+antigravity.json
+cursor.json
+settings.json.usage-widget-backup-*
