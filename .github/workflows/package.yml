@@ -1,0 +1,22 @@
+name: Package artifacts
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: macos-14
+    env:
+      CODEX_WIDGET_DIST_DIR: ${{ github.workspace }}/dist
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: ./scripts/check.sh
+      - run: ./scripts/package.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: codex-usage-widget
+          path: dist/*.zip
+          retention-days: 14
+# This workflow creates downloadable CI artifacts; it does not publish a release.
