@@ -24,7 +24,9 @@
 
 需要 macOS 13+、Swift 5.9+／Xcode Command Line Tools、測試用 Python 3，以及已登入 ChatGPT 帳號的 Codex App 或 CLI。Codex 核心小卡不依賴 Python，其他 agent 橋接需要 Python 3。
 
-先從 [Releases](https://github.com/dwagwd/codex-plugin/releases/latest) 下載來源 ZIP 並解壓，於資料夾開啟終端機；或先執行 `git clone https://github.com/dwagwd/codex-plugin.git codex-usage-widget`，再 `cd codex-usage-widget`。
+**快速安裝：**從 [Releases](https://github.com/dwagwd/codex-plugin/releases/latest) 下載 `CodexUsageWidget-<版本>-macos-universal.zip`，解壓後把 **Codex Usage Widget.app** 移到「應用程式」。App 已簽章並經 Apple 公證，開啟時不會出現安全性警告。
+
+**從原始碼建置：**先從 [Releases](https://github.com/dwagwd/codex-plugin/releases/latest) 下載來源 ZIP 並解壓，於資料夾開啟終端機；或先執行 `git clone https://github.com/dwagwd/codex-plugin.git codex-usage-widget`，再 `cd codex-usage-widget`。
 
 ```sh
 ./scripts/check.sh
@@ -46,7 +48,7 @@ Codex 額度來自 `account/rateLimits/read`，tokens 來自 `account/usage/read
 
 ## 開源準備
 
-採 MIT。包含貢獻、安全回報、隱私、變更記錄、CI、手動打包 workflow 與來源匯出檢查。v0.3.1 為首個公開原始碼版本，附來源 ZIP 與 SHA-256 校驗碼。App 尚未公證，因此公開 release 不附預先編譯的 App，請依上述步驟在本機建置。Codex 已實測；其他 agent 橋接仍屬實驗性功能，通過資料格式測試但尚未完成真實帳號驗證。
+採 MIT。包含貢獻、安全回報、隱私、變更記錄、CI、手動打包 workflow 與來源匯出檢查。v0.4.0 起提供以 Developer ID 簽章並經 Apple 公證的通用版 App ZIP（Apple 晶片與 Intel 皆可），另附來源 ZIP 與 SHA-256 校驗碼。Codex 已實測；其他 agent 橋接仍屬實驗性功能，通過資料格式測試但尚未完成真實帳號驗證。
 
 ```sh
 ./scripts/package.sh

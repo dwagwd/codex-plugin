@@ -15,7 +15,7 @@
 - Enable GitHub private vulnerability reporting and configure branch protection after CI is available.
 - Verify GitHub Actions on the chosen repository; local validation does not mean hosted CI has passed.
 - Review the license, project description, screenshots, and source archive for personal data.
-- The first public release is source-only. Do not upload the locally built ad-hoc-signed App ZIP as a ready-to-install release asset. Apple signing/notarization and download-install testing are prerequisites for official prebuilt binaries.
+- Upload only Developer ID signed, notarized, stapled App ZIPs (see below). Never attach an ad-hoc-signed App ZIP as a ready-to-install asset.
 
 ## Signed, notarized app builds
 

@@ -3,7 +3,7 @@
 # Users then install with: brew install --cask dwagwd/tap/codex-usage-widget
 cask "codex-usage-widget" do
   version "0.4.0"
-  sha256 "REPLACE_WITH_SHA256_OF_UNIVERSAL_ZIP"
+  sha256 "d0abbe31ffa0b73aab94354f40fde2fd8e3cda92065ef50194e0edf1f70bc58a"
 
   url "https://github.com/dwagwd/codex-plugin/releases/download/v#{version}/CodexUsageWidget-#{version}-macos-universal.zip"
   name "Codex Usage Widget"

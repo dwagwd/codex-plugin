@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 - Release tooling: optional universal (arm64 + x86_64) builds, Developer ID signing with the hardened runtime, notarization and stapling in `package.sh`, and a Homebrew cask template.
 - Add optional quota alerts (off by default): a system notification once per reset cycle when a quota reaches 90% or would run out before reset at the current pace.
