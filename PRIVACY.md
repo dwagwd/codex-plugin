@@ -13,7 +13,7 @@ In `~/Library/Application Support/CodexUsageWidget/`:
 - `status.json`: current widget diagnostics, selected plan/window, operational settings, and the active task's title and optional project/issue/model labels.
 - `task-ledger.json`: manually entered Codex task metadata, elapsed-time boundaries, retry counts, outcomes, and validation notes.
 - `account-observations.json`: quota and account-token snapshots captured at task boundaries, kept separate from task-attributed usage.
-- `usage-events.jsonl` and `usage-event-state.json`: append-only account-level quota/token checkpoints and source events, plus the latest checkpoint used to detect data gaps.
+- `usage-events.jsonl` (plus archived `usage-events-<time>.jsonl` files over 20 MB) and `usage-event-state.json`: append-only account-level quota/token checkpoints and source events, plus the latest checkpoint used to detect data gaps.
 - `instance.lock`: prevents duplicate processes.
 
 Language, observation duration, rate unit, position, and collapse/pin preferences are stored in the app's defaults domain. Account email/id is used in memory to derive an identifier; raw credentials are never persisted by the widget.

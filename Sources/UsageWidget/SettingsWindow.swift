@@ -12,6 +12,7 @@ final class SettingsWindowController: NSWindowController {
     private let colors = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let eco = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let bridges = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let alerts = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private var quotaChecks: [(String, NSButton)] = []
     private var rgbFields: [NSTextField] = []
     private let errorLabel = NSTextField(wrappingLabelWithString: "")
@@ -86,7 +87,10 @@ final class SettingsWindowController: NSWindowController {
             }
         }
         eco.title = l.text("eco"); eco.state = settings.options.energySaver ? .on : .off
-        eco.frame = NSRect(x: 22, y: 148, width: 396, height: 24)
+        eco.frame = NSRect(x: 22, y: 148, width: 236, height: 24)
+        alerts.title = l.text("quotaAlerts"); alerts.state = settings.quotaAlertsEnabled ? .on : .off
+        alerts.frame = NSRect(x: 262, y: 148, width: 156, height: 24)
+        alerts.toolTip = l.text("quotaAlertsHelp")
         bridges.title = l.text("bridges"); bridges.state = settings.options.bridges ? .on : .off
         bridges.frame = NSRect(x: 22, y: 117, width: 245, height: 24)
         let guide = NSButton(title: l.text("bridgeHelp"), target: self, action: #selector(connectionGuide))
@@ -94,7 +98,7 @@ final class SettingsWindowController: NSWindowController {
         let selectionHint = NSTextField(wrappingLabelWithString: l.text("selectionHint"))
         selectionHint.frame = NSRect(x: 22, y: 80, width: 396, height: 30)
         selectionHint.font = .systemFont(ofSize: 11); selectionHint.textColor = .secondaryLabelColor
-        for control in [multiple, scroll, colors, eco, bridges, guide, selectionHint] { view.addSubview(control) }
+        for control in [multiple, scroll, colors, eco, alerts, bridges, guide, selectionHint] { view.addSubview(control) }
         errorLabel.frame = NSRect(x: 22, y: 48, width: 396, height: 32)
         errorLabel.font = .systemFont(ofSize: 11); errorLabel.textColor = .systemRed
         let cancel = NSButton(title: l.text("cancel"), target: self, action: #selector(cancel))
@@ -134,6 +138,7 @@ final class SettingsWindowController: NSWindowController {
         options.background = RGBColor(components[3], components[4], components[5])
         options.energySaver = eco.state == .on; options.bridges = bridges.state == .on
         next.options = options
+        next.quotaAlertsEnabled = alerts.state == .on
         guard next.isValid else { errorLabel.stringValue = L10n(settings.language).text("invalidInterval"); return }
         applySettings(next); close()
     }

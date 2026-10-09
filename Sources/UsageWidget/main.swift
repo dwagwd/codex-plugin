@@ -1,4 +1,5 @@
 import AppKit
+import UserNotifications
 import UsageCore
 import UsageTransport
 
@@ -40,7 +41,7 @@ final class CardBackground: NSVisualEffectView {
     override func mouseUp(with event: NSEvent) { dragStart = nil; originalOrigin = nil }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate {
     private let client = UsageClient()
     private var panel: FloatingPanel!
     private var status: NSStatusItem!
@@ -52,6 +53,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var usageEventLedger = UsageEventLedger()
     private var pendingUsageEventWrites: [UsageLedgerEvent] = []
     private let maxPendingUsageEventWrites = 1_000
+    private var quotaAlertTracker = QuotaAlertTracker()
+    private let usageEventFileRotationBytes: UInt64 = 20 * 1_048_576
     private var usageEventLastAttemptAt: Double?
     private var usageEventLastSuccessAt: Double?
     private var usageEventLastErrorCode: String?
@@ -115,6 +118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         loadUsageEventLedger()
         client.pollInterval = settings.options.energySaver ? 120 : 60
         setupPanel(); setupStatus()
+        requestAlertAuthorizationIfNeeded()
         client.onResult = { [weak self] response, account in self?.received(response, account: account) }
         client.onTokens = { [weak self] total, account in
             guard let self else { return }
@@ -437,9 +441,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             extraLabels[index].stringValue = line + "\n" + rate + "\n" + (old ? l.text("stale") + " · " : "") + l.countdown(extra.window.resetsAt, now: now)
             extraLabels[index].toolTip = extraLabels[index].stringValue + "\n" + l.text("quotaHelp")
         }
+        checkQuotaAlerts(now: now)
         lastFreshness = items.map { isStale($0, now: now) || ($0.window.resetsAt.map { $0 <= now } ?? false) } + [stale, tokenStale]
         applyColors()
     }
+    /// Notification delivery needs an app bundle; a bare `swift run` executable has none.
+    private var notificationsAvailable: Bool { Bundle.main.bundleIdentifier != nil && Bundle.main.bundleURL.pathExtension == "app" }
+
+    private func requestAlertAuthorizationIfNeeded() {
+        guard settings.quotaAlertsEnabled, notificationsAvailable else { return }
+        UNUserNotificationCenter.current().delegate = self
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    // The widget is an agent app that is often frontmost; show alerts as banners anyway.
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
+    }
+
+    private func checkQuotaAlerts(now: Double) {
+        guard settings.quotaAlertsEnabled, notificationsAvailable, !ratesDirty else { return }
+        for item in ([current].compactMap { $0 } + extraItems) where !isStale(item, now: now) {
+            let forecast = forecastQuota(used: item.window.validUsedPercent, perHour: cachedRates[item.id]?.perHour,
+                                         resetsAt: item.window.resetsAt, now: now)
+            for kind in quotaAlertTracker.alerts(windowID: item.id, used: item.window.validUsedPercent,
+                                                 resetsAt: item.window.resetsAt, forecast: forecast) {
+                let content = UNMutableNotificationContent()
+                content.title = title(for: item)
+                switch kind {
+                case .highUsage:
+                    content.body = l.number(item.window.validUsedPercent ?? 0, decimals: 0) + "% " + l.text("alertHighUsage") + " · " + l.text("reset") + " " + l.countdown(item.window.resetsAt, now: now)
+                case .projectedExhaustion:
+                    let eta = forecast?.exhaustsAt.map { l.countdown(max($0, now + 1), now: now) } ?? "—"
+                    content.body = l.text("forecastFullIn") + " " + eta + " · " + l.text("alertBeforeReset")
+                }
+                let request = UNNotificationRequest(identifier: "quota.\(item.id).\(kind.rawValue)", content: content, trigger: nil)
+                UNUserNotificationCenter.current().add(request)
+            }
+        }
+    }
+
     private func forecastDetail(_ forecast: QuotaForecast?, now: Double) -> String {
         guard let forecast else { return "" }
         let value = forecast.exhaustsAt.map { l.text("forecastFullIn") + " " + l.countdown($0 > now ? $0 : now + 1, now: now) }
@@ -456,6 +498,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let self else { return }
             self.settings = next
             self.ratesDirty = true
+            self.requestAlertAuthorizationIfNeeded()
             self.client.pollInterval = next.options.energySaver ? 120 : 60
             self.startUITimer(); self.reloadBridges(); self.rebuildItems()
             self.defaults.set(try? JSONEncoder().encode(next), forKey: "settings")
@@ -785,6 +828,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             data.append(try encoder.encode(event))
             data.append(0x0A)
         }
+        rotateUsageEventFileIfNeeded(url)
         if !FileManager.default.fileExists(atPath: url.path),
            !FileManager.default.createFile(atPath: url.path, contents: Data(), attributes: [.posixPermissions: 0o600]) {
             throw CocoaError(.fileWriteUnknown)
@@ -803,6 +847,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         pendingUsageEventWrites.removeAll(keepingCapacity: true)
         try handle.synchronize()
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    /// Archives a large event log as `usage-events-<UTC time>.jsonl`; nothing is deleted.
+    private func rotateUsageEventFileIfNeeded(_ url: URL) {
+        guard let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? UInt64,
+              size >= usageEventFileRotationBytes else { return }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
+        let archive = support.appendingPathComponent("usage-events-\(formatter.string(from: Date())).jsonl")
+        guard !FileManager.default.fileExists(atPath: archive.path) else { return }
+        try? FileManager.default.moveItem(at: url, to: archive)
+    }
+
+    /// Archived event logs oldest first, followed by the active log.
+    private func usageEventFiles() -> [URL] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: support.path)) ?? []
+        let archives = names.filter { $0.hasPrefix("usage-events-") && $0.hasSuffix(".jsonl") }.sorted()
+        return (archives + ["usage-events.jsonl"]).map { support.appendingPathComponent($0) }
+            .filter { FileManager.default.fileExists(atPath: $0.path) }
     }
 
     private func saveUsageEventState() throws {
@@ -1070,6 +1134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         persistUsageEventChanges([], now: Date().timeIntervalSince1970)
         let source = support.appendingPathComponent("usage-events.jsonl")
+        let sources = usageEventFiles()
         var temporaryURL: URL?
         defer {
             if let temporaryURL, FileManager.default.fileExists(atPath: temporaryURL.path) {
@@ -1084,8 +1149,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 let temporary = url.deletingLastPathComponent()
                     .appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
                 temporaryURL = temporary
-                try FileManager.default.copyItem(at: source, to: temporary)
-                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: temporary.path)
+                guard FileManager.default.createFile(atPath: temporary.path, contents: Data(), attributes: [.posixPermissions: 0o600]) else {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+                let output = try FileHandle(forWritingTo: temporary)
+                defer { try? output.close() }
+                for file in sources {
+                    var data = try Data(contentsOf: file, options: .mappedIfSafe)
+                    if let last = data.last, last != 0x0A { data.append(0x0A) }
+                    try output.write(contentsOf: data)
+                }
+                try output.synchronize()
                 if FileManager.default.fileExists(atPath: url.path) {
                     _ = try FileManager.default.replaceItemAt(url, withItemAt: temporary)
                 } else {
@@ -1140,6 +1214,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         data["displayedWindows"] = ([current].compactMap { $0 } + extraItems).map(\.id)
         data["energySaver"] = settings.options.energySaver
         data["enabledBridges"] = settings.options.bridges
+        data["quotaAlerts"] = settings.quotaAlertsEnabled
         data["selectedWindow"] = current?.id
         data["usedPercent"] = current?.window.validUsedPercent
         data["resetsAt"] = current?.window.resetsAt

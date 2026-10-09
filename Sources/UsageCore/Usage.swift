@@ -165,6 +165,11 @@ public struct WidgetSettings: Codable, Equatable {
     public var intervalUnit: TimeUnit = .hour
     public var rateUnit: TimeUnit = .hour
     public var customization: Customization? = nil
+    public var quotaAlerts: Bool? = nil
+    public var quotaAlertsEnabled: Bool {
+        get { quotaAlerts ?? false }
+        set { quotaAlerts = newValue }
+    }
     public var options: Customization {
         get { customization ?? Customization() }
         set { customization = newValue }

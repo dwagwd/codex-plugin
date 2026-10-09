@@ -55,4 +55,30 @@ final class QuotaForecastTests: XCTestCase {
             }
         }
     }
+
+    func testAlertsFireOncePerResetCycle() {
+        var tracker = QuotaAlertTracker()
+        let exhausting = forecastQuota(used: 60, perHour: 20, resetsAt: 10_000 + 5 * 3600, now: 10_000)
+        XCTAssertEqual(tracker.alerts(windowID: "codex:primary", used: 50, resetsAt: 9_000, forecast: nil), [])
+        XCTAssertEqual(tracker.alerts(windowID: "codex:primary", used: 60, resetsAt: 9_000, forecast: exhausting), [.projectedExhaustion])
+        XCTAssertEqual(tracker.alerts(windowID: "codex:primary", used: 70, resetsAt: 9_000, forecast: exhausting), [])
+        XCTAssertEqual(tracker.alerts(windowID: "codex:primary", used: 91, resetsAt: 9_000, forecast: exhausting), [.highUsage])
+        XCTAssertEqual(tracker.alerts(windowID: "codex:primary", used: 95, resetsAt: 9_000, forecast: nil), [])
+        XCTAssertEqual(tracker.alerts(windowID: "codex:secondary", used: 92, resetsAt: 9_000, forecast: nil), [.highUsage])
+        // A new reset time starts a new cycle.
+        XCTAssertEqual(tracker.alerts(windowID: "codex:primary", used: 92, resetsAt: 20_000, forecast: nil), [.highUsage])
+        // A usage drop without a new reset time also starts a new cycle.
+        XCTAssertEqual(tracker.alerts(windowID: "codex:primary", used: 5, resetsAt: 20_000, forecast: nil), [])
+        XCTAssertEqual(tracker.alerts(windowID: "codex:primary", used: 93, resetsAt: 20_000, forecast: nil), [.highUsage])
+        XCTAssertEqual(tracker.alerts(windowID: "codex:primary", used: nil, resetsAt: 20_000, forecast: nil), [])
+    }
+
+    func testAlertSettingDecodesFromOlderPreferences() throws {
+        let old = try JSONDecoder().decode(WidgetSettings.self, from: JSONEncoder().encode(WidgetSettings()))
+        XCTAssertFalse(old.quotaAlertsEnabled)
+        let legacy = #"{"language":"en","intervalValue":1,"intervalUnit":"hour","rateUnit":"hour"}"#
+        XCTAssertFalse(try JSONDecoder().decode(WidgetSettings.self, from: Data(legacy.utf8)).quotaAlertsEnabled)
+        var enabled = WidgetSettings(); enabled.quotaAlertsEnabled = true
+        XCTAssertTrue(try JSONDecoder().decode(WidgetSettings.self, from: JSONEncoder().encode(enabled)).quotaAlertsEnabled)
+    }
 }
