@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Add per-source freshness diagnostics with last attempt/success times, data age, retries, and bridge snapshot errors.
+- Add a local Codex task ledger for task metadata, elapsed time, retries, and verification outcome.
+- Add an append-only usage event ledger with account checkpoints, data gaps, account switches, quota resets, source corrections, and source recovery events.
+- Save account quota and token-counter snapshots separately from task consumption; do not infer per-task usage from account-wide changes.
+- Add local JSON/JSONL exports for task records, linked account observations, and the long-term usage event stream.
+
 ## 0.3.1 — First public source release
 
 - Correct provider-specific freshness/tooltips and suppress unrelated Codex errors on other providers.

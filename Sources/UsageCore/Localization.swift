@@ -39,6 +39,9 @@ public struct L10n {
     }
     public static let table: [String: [String: String]] = {
         var result = baseTable
+        for (key, values) in featureTranslations {
+            result[key, default: [:]].merge(values) { _, new in new }
+        }
         for (key, values) in extraTranslations {
             result[key, default: [:]].merge(values) { _, new in new }
         }

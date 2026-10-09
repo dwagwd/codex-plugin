@@ -2,6 +2,23 @@ import Foundation
 import CryptoKit
 import UsageCore
 
+public struct ClientDiagnostics: Codable, Equatable {
+    public let lastAttemptAt: Double?
+    public let lastQuotaSuccessAt: Double?
+    public let lastTokenAttemptAt: Double?
+    public let lastTokenSuccessAt: Double?
+    public let lastTokenAttemptAccountKey: String?
+    public let lastTokenSuccessAccountKey: String?
+    public let lastFailureCode: String?
+    public let lastTokenErrorCode: String?
+    public let consecutiveFailures: Int
+    public let consecutiveTokenFailures: Int
+    public let nextAttemptAt: Double?
+    public let connected: Bool
+    public let requestInFlight: Bool
+    public let suspended: Bool
+}
+
 // All mutable state is confined to the main queue. No model turns are created.
 public final class UsageClient {
     private let overrideExecutable: String?
@@ -13,6 +30,7 @@ public final class UsageClient {
     }
     public var onResult: ((LimitsResponse, String) -> Void)?
     public var onTokens: ((Double?, String) -> Void)?
+    public var onDiagnostics: ((ClientDiagnostics) -> Void)?
     private var pendingTokenAccount: String?
     public var onFailure: ((String) -> Void)?
     private var process: Process?
@@ -26,21 +44,44 @@ public final class UsageClient {
     private var timeout: Timer?
     private var retryTimer: Timer?
     private var failures = 0
+    private var tokenFailures = 0
     private var suspended = false
     private var stopping = false
     private(set) var executable: String?
+    private var lastAttemptAt: Double?
+    private var lastQuotaSuccessAt: Double?
+    private var lastTokenAttemptAt: Double?
+    private var lastTokenSuccessAt: Double?
+    private var lastTokenAttemptAccountKey: String?
+    private var lastTokenSuccessAccountKey: String?
+    private var lastFailureCode: String?
+    private var lastTokenErrorCode: String?
+    private var nextAttemptAt: Double?
+
+    public var diagnostics: ClientDiagnostics {
+        ClientDiagnostics(lastAttemptAt: lastAttemptAt, lastQuotaSuccessAt: lastQuotaSuccessAt,
+                          lastTokenAttemptAt: lastTokenAttemptAt, lastTokenSuccessAt: lastTokenSuccessAt,
+                          lastTokenAttemptAccountKey: lastTokenAttemptAccountKey,
+                          lastTokenSuccessAccountKey: lastTokenSuccessAccountKey,
+                          lastFailureCode: lastFailureCode, lastTokenErrorCode: lastTokenErrorCode,
+                          consecutiveFailures: failures, consecutiveTokenFailures: tokenFailures,
+                          nextAttemptAt: nextAttemptAt,
+                          connected: process?.isRunning == true && ready, requestInFlight: inFlight,
+                          suspended: suspended)
+    }
 
     public func refresh() {
         guard !suspended, !stopping, !inFlight else { return }
         retryTimer?.invalidate(); retryTimer = nil
+        nextAttemptAt = nil; lastAttemptAt = Date().timeIntervalSince1970; publishDiagnostics()
         if process == nil { start(); return }
         guard ready else { return }
-        inFlight = true
+        inFlight = true; publishDiagnostics()
         armTimeout()
         send(["id": 2, "method": "account/read", "params": [:]])
     }
-    public func suspend() { suspended = true; disconnect(); retryTimer?.invalidate() }
-    public func resume() { suspended = false; refresh() }
+    public func suspend() { suspended = true; disconnect(); retryTimer?.invalidate(); nextAttemptAt = nil; publishDiagnostics() }
+    public func resume() { suspended = false; publishDiagnostics(); refresh() }
     public func stop() {
         stopping = true; retryTimer?.invalidate()
         let child = process
@@ -87,7 +128,7 @@ public final class UsageClient {
                 self.fail("serviceStopped")
             }
         }
-        process = p; input = stdin; output = stdout; inFlight = true
+        process = p; input = stdin; output = stdout; inFlight = true; publishDiagnostics()
         do {
             try p.run()
             armTimeout()
@@ -110,14 +151,15 @@ public final class UsageClient {
             guard let json = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
             // Ignore unrelated notifications and server requests: this client only reads account limits.
             guard let id = json["id"] as? Int, (1...4).contains(id) else { continue }
-            if id == 4, pendingTokenAccount != nil, json["error"] != nil { finishTokens(nil); continue }
+            if id == 4, pendingTokenAccount != nil, json["error"] != nil { finishTokens(nil, errorCode: "tokenReadFailed"); continue }
             if json["error"] != nil { fail("readFailed"); return }
             guard let result = json["result"] as? [String: Any] else {
-                if id == 4 { finishTokens(nil) }; continue
+                if id == 4 { finishTokens(nil, errorCode: "invalidTokenResponse") }; continue
             }
             switch id {
             case 1:
                 timeout?.invalidate(); ready = true; inFlight = false
+                publishDiagnostics()
                 send(["method": "initialized"]); refresh()
             case 2:
                 let account = result["account"] as? [String: Any]
@@ -131,24 +173,35 @@ public final class UsageClient {
                     guard let identity = limits.accountId.map({ Self.hash($0) }) ?? accountIdentity else {
                         fail("loginRequired"); return
                     }
-                    timeout?.invalidate(); failures = 0
+                    timeout?.invalidate(); failures = 0; lastFailureCode = nil
+                    lastQuotaSuccessAt = Date().timeIntervalSince1970
                     pendingTokenAccount = identity
-                    onResult?(limits, identity)
+                    onResult?(limits, identity); publishDiagnostics()
                     armTimeout()
+                    lastTokenAttemptAt = Date().timeIntervalSince1970
+                    lastTokenAttemptAccountKey = identity
+                    lastTokenErrorCode = nil; publishDiagnostics()
                     send(["id": 4, "method": "account/usage/read", "params": [:]])
                 } catch { fail("invalidQuota") }
             case 4:
                 let bytes = try? JSONSerialization.data(withJSONObject: result)
                 let usage = bytes.flatMap { try? JSONDecoder().decode(TokenUsageResponse.self, from: $0) }
-                finishTokens(usage?.summary?.lifetimeTokens)
+                finishTokens(usage?.summary?.lifetimeTokens, errorCode: usage?.summary?.lifetimeTokens == nil ? "tokenUnavailable" : nil)
             default: break
             }
         }
     }
-    private func finishTokens(_ total: Double?) {
+    private func finishTokens(_ total: Double?, errorCode: String? = nil) {
         guard let account = pendingTokenAccount else { return }
         pendingTokenAccount = nil; timeout?.invalidate(); inFlight = false
-        onTokens?(total, account)
+        let validTotal = total.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
+        if validTotal != nil {
+            lastTokenSuccessAt = Date().timeIntervalSince1970; lastTokenErrorCode = nil; tokenFailures = 0
+            lastTokenSuccessAccountKey = account
+        } else {
+            lastTokenErrorCode = errorCode ?? "invalidTokenCount"; tokenFailures += 1
+        }
+        onTokens?(validTotal, account)
         schedule(after: pollInterval)
     }
     private static func hash(_ value: String) -> String {
@@ -159,19 +212,21 @@ public final class UsageClient {
         timeout = Timer.scheduledTimer(withTimeInterval: requestTimeout, repeats: false) { [weak self] _ in
             guard let self else { return }
             if self.pendingTokenAccount != nil {
-                self.finishTokens(nil)
+                self.finishTokens(nil, errorCode: "tokenTimeout")
                 self.disconnect() // Tokens are optional; a token timeout must not invalidate fresh quota.
             } else { self.fail("timeout") }
         }
     }
     private func fail(_ message: String) {
         guard !stopping, !suspended else { return }
-        if pendingTokenAccount != nil { finishTokens(nil) }
-        disconnect(); failures += 1; onFailure?(message)
+        if pendingTokenAccount != nil { finishTokens(nil, errorCode: message) }
+        disconnect(); failures += 1; lastFailureCode = message; onFailure?(message)
         schedule(after: min(300, retryBase * pow(2, Double(min(failures-1, 5)))))
     }
     private func schedule(after interval: Double) {
         retryTimer?.invalidate()
+        nextAttemptAt = Date().timeIntervalSince1970 + interval
+        publishDiagnostics()
         retryTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in self?.refresh() }
     }
     private func disconnect() {
@@ -186,5 +241,9 @@ public final class UsageClient {
             }
         }
         pendingTokenAccount = nil; process = nil; input = nil; output = nil; ready = false; inFlight = false; buffer = Data()
+        publishDiagnostics()
+    }
+    private func publishDiagnostics() {
+        onDiagnostics?(diagnostics)
     }
 }

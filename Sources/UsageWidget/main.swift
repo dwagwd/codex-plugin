@@ -47,8 +47,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let defaults = UserDefaults.standard
     private var history = History()
     private var tokenHistory = TokenHistory()
+    private var taskLedger = TaskLedger()
+    private var accountObservations = AccountObservationLedger()
+    private var usageEventLedger = UsageEventLedger()
+    private var pendingUsageEventWrites: [UsageLedgerEvent] = []
+    private var usageEventLastAttemptAt: Double?
+    private var usageEventLastSuccessAt: Double?
+    private var usageEventLastErrorCode: String?
+    private var usageEventIntegrityErrorCode: String?
+    private var usageEventConsecutiveFailures = 0
     private var tokenAvailable = false
-    private var tokenUpdated: Date?
     private var settings = WidgetSettings()
     private var settingsWindow: SettingsWindowController?
     private var l: L10n { L10n(settings.language) }
@@ -57,6 +65,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var bridgeSnapshots: [String: ProviderSnapshot] = [:]
     private var bridgeHistories: [String: History] = [:]
     private var bridgeDates: [String: Date] = [:]
+    private var bridgeLastAttempt: [String: Double] = [:]
+    private var bridgeLastError: [String: String] = [:]
+    private var bridgeFailureCounts: [String: Int] = [:]
     private var bridgeTick: Timer?
     private var extraLabels: [NSTextField] = []
     private var cachedRates: [String: Rate] = [:]
@@ -87,7 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let progress = NSProgressIndicator()
     private let colorOverlay = ColorOverlay()
     private var current: WindowItem? { items.first { $0.id == selectedID } ?? items.first }
-    private var stale: Bool { errorMessage != nil || lastUpdate.map { Date().timeIntervalSince($0) > self.client.pollInterval + 30 } ?? true }
+    private var stale: Bool { lastUpdate.map { Date().timeIntervalSince($0) > self.client.pollInterval + 30 } ?? true }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -98,19 +109,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
            let saved = try? JSONDecoder().decode(History.self, from: data) { history = saved }
         if let data = defaults.data(forKey: "settings"), let decoded = try? JSONDecoder().decode(WidgetSettings.self, from: data), decoded.isValid { settings = decoded }
         if let data = try? Data(contentsOf: support.appendingPathComponent("tokens.json")), let saved = try? JSONDecoder().decode(TokenHistory.self, from: data) { tokenHistory = saved }
+        if let data = try? Data(contentsOf: support.appendingPathComponent("task-ledger.json")), let saved = try? JSONDecoder().decode(TaskLedger.self, from: data) { taskLedger = saved }
+        if let data = try? Data(contentsOf: support.appendingPathComponent("account-observations.json")), let saved = try? JSONDecoder().decode(AccountObservationLedger.self, from: data) { accountObservations = saved }
+        loadUsageEventLedger()
         client.pollInterval = settings.options.energySaver ? 120 : 60
         setupPanel(); setupStatus()
         client.onResult = { [weak self] response, account in self?.received(response, account: account) }
         client.onTokens = { [weak self] total, account in
             guard let self else { return }
             self.tokenAvailable = total.map { $0.isFinite && $0 >= 0 } ?? false
-            self.tokenUpdated = Date()
-            self.tokenHistory.record(account: account, total: total, now: Date().timeIntervalSince1970)
+            let now = Date().timeIntervalSince1970
+            self.tokenHistory.record(account: account, total: total, now: now)
             if let data = try? JSONEncoder().encode(self.tokenHistory) { try? data.write(to: support.appendingPathComponent("tokens.json"), options: .atomic) }
+            self.recordUsageObservation(account: account, tokenTotal: total, now: now)
             self.ratesDirty = true; self.render(); self.writeStatus()
         }
         client.onFailure = { [weak self] message in
-            self?.errorMessage = message; self?.render(); self?.writeStatus()
+            guard let self else { return }
+            self.errorMessage = message
+            self.recordUsageFailure(sourceID: "codex.quota", errorCode: message,
+                                    accountKey: self.history.account, now: Date().timeIntervalSince1970)
+            self.render(); self.writeStatus()
+        }
+        client.onDiagnostics = { [weak self] _ in
+            self?.render(); self?.writeStatus()
         }
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(willSleep), name: NSWorkspace.willSleepNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(didWake), name: NSWorkspace.didWakeNotification, object: nil)
@@ -138,8 +160,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     private func renderCountdown() {
         let now = Date().timeIntervalSince1970
-        let freshness = items.map { isStale($0, now: now) || ($0.window.resetsAt.map { $0 <= now } ?? false) } + [stale]
-        if freshness != lastFreshness { render(); return }
+        let tokenStale = !tokenAvailable || client.diagnostics.lastTokenSuccessAt.map { now - $0 > client.pollInterval + 30 } ?? true
+        let freshness = items.map { isStale($0, now: now) || ($0.window.resetsAt.map { $0 <= now } ?? false) } + [stale, tokenStale]
+        if freshness != lastFreshness { render(); writeStatus(); return }
         guard !collapsed else { return }
         if let item = current {
             let prefix = isStale(item, now: now) ? l.text("stale") + " · " : (item.window.resetsAt.map { $0 > now } ?? false ? l.text("reset") + " " : "")
@@ -190,17 +213,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func reloadBridges() {
         guard settings.options.bridges else { return }
         var changed = false
+        let now = Date().timeIntervalSince1970
         for provider in ["claude", "antigravity", "cursor"] {
+            bridgeLastAttempt[provider] = now
             let path = support.appendingPathComponent("providers/" + provider + ".json")
             guard let attrs = try? FileManager.default.attributesOfItem(atPath: path.path),
-                  let date = attrs[.modificationDate] as? Date,
-                  (attrs[.size] as? NSNumber)?.intValue ?? Int.max <= 262144,
-                  date != bridgeDates[provider] else { continue }
+                  let date = attrs[.modificationDate] as? Date else {
+                markBridgeFailure(provider, code: "snapshotMissing"); continue
+            }
+            let size = (attrs[.size] as? NSNumber)?.intValue ?? Int.max
+            guard size <= 262144 else { markBridgeFailure(provider, code: "snapshotTooLarge"); continue }
+            guard date != bridgeDates[provider] || bridgeLastError[provider] != nil else { continue }
             bridgeDates[provider] = date
-            guard let bytes = try? Data(contentsOf: path),
-                  let snapshot = try? JSONDecoder().decode(ProviderSnapshot.self, from: bytes),
-                  snapshot.isValid(now: Date().timeIntervalSince1970, expectedProvider: provider),
-                  snapshot.limits.windows().allSatisfy({ $0.id.hasPrefix(provider + ":") }) else { continue }
+            guard let bytes = try? Data(contentsOf: path) else { markBridgeFailure(provider, code: "snapshotUnreadable"); continue }
+            guard let snapshot = try? JSONDecoder().decode(ProviderSnapshot.self, from: bytes),
+                  snapshot.isValid(now: now, expectedProvider: provider),
+                  snapshot.limits.windows().allSatisfy({ $0.id.hasPrefix(provider + ":") }) else {
+                markBridgeFailure(provider, code: "snapshotInvalid"); continue
+            }
+            bridgeLastError[provider] = nil; bridgeFailureCounts[provider] = 0
             if snapshot.updatedAt == bridgeSnapshots[provider]?.updatedAt { continue }
             bridgeSnapshots[provider] = snapshot
             var history = bridgeHistories[provider] ?? History()
@@ -208,6 +239,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             bridgeHistories[provider] = history; changed = true
         }
         if changed { ratesDirty = true; rebuildItems(); resize(); screensChanged(); render(); writeStatus() }
+        else { writeStatus() }
+    }
+    private func markBridgeFailure(_ provider: String, code: String) {
+        bridgeLastError[provider] = code
+        bridgeFailureCounts[provider, default: 0] += 1
     }
     private func setupPanel() {
         panel = FloatingPanel(contentRect: NSRect(x: 0, y: 0, width: 260, height: 128), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -266,6 +302,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         add(l.text("toggleVisible"), #selector(toggleVisible))
         add(l.text("refresh"), #selector(refresh))
+        add(l.text(taskLedger.activeTask == nil ? "startTask" : "finishTask"), #selector(toggleTask))
+        add(l.text("taskHistory"), #selector(showTaskHistory))
+        add(l.text("exportTaskLedger"), #selector(exportTaskLedger))
+        add(l.text("usageEventHistory"), #selector(showUsageEventHistory))
+        add(l.text("exportUsageEvents"), #selector(exportUsageEvents))
+        add(l.text("sourceDiagnostics"), #selector(showSourceDiagnostics))
         add(l.text("toggleCollapsed"), #selector(toggleCollapsed))
         add(l.text("pin"), #selector(togglePinned))
         menu.items.last?.state = pinned ? .on : .off
@@ -360,7 +402,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let itemStale = item.map { isStale($0, now: now) } ?? stale
         let planRate = item.flatMap { cachedRates[$0.id] }
         let tokenRate = cachedTokenRate
-        let tokenStale = stale || !tokenAvailable || (tokenUpdated.map { Date().timeIntervalSince($0) > self.client.pollInterval + 30 } ?? true)
+        let tokenStale = !tokenAvailable || client.diagnostics.lastTokenSuccessAt.map { now - $0 > self.client.pollInterval + 30 } ?? true
         let sourceUpdated = item.flatMap { sourceUpdate(for: $0) }
         let sourceError = item.flatMap { providerFor($0) } == nil ? errorMessage : nil
         let planUnavailable = itemStale || item?.window.validUsedPercent == nil || (item?.window.resetsAt.map { $0 <= now } ?? false)
@@ -375,7 +417,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let formatter = dateFormatter; formatter.locale = l.locale; formatter.dateStyle = .medium; formatter.timeStyle = .medium
         let resetDate = item?.window.resetsAt.map { formatter.string(from: Date(timeIntervalSince1970: $0)) } ?? l.text("unknown")
         let updated = sourceUpdated.map { formatter.string(from: $0) } ?? l.text("unavailable")
-        let detail = "\(valueLabel.stringValue) · \(item.map { title(for: $0) } ?? "Codex")\n\(l.text("reset")): \(resetDate)\n\(rateLabel.stringValue)\n\(tokenLabel.stringValue)\n\(observationLabel.stringValue)\n\(l.text("updated")): \(updated)" + (sourceError.map { "\n"+l.text($0) } ?? "")
+        let sourceID = item.flatMap { providerFor($0).map { "bridge.\($0)" } } ?? "codex.quota"
+        let selectedSource = sourceDiagnostics(now: now).first { $0.id == sourceID }
+        let tokenSource = sourceDiagnostics(now: now).first { $0.id == "codex.accountTokens" }
+        let sourceState = selectedSource.map { healthTitle($0.health) } ?? l.text("unavailable")
+        let tokenFreshness = tokenSource.map { healthTitle($0.health) } ?? l.text("unavailable")
+        let detail = "\(valueLabel.stringValue) · \(item.map { title(for: $0) } ?? "Codex")\n\(l.text("reset")): \(resetDate)\n\(rateLabel.stringValue)\n\(tokenLabel.stringValue)\n\(observationLabel.stringValue)\n\(l.text("updated")): \(updated) · \(sourceState) · \(diagnosticAge(selectedSource?.ageSeconds))\n\(l.text("sourceCodexTokens")): \(tokenFreshness) · \(diagnosticAge(tokenSource?.ageSeconds))" + (sourceError.map { "\n"+l.text($0) } ?? "")
         panel.contentView?.toolTip = detail; valueLabel.toolTip = detail; resetLabel.toolTip = detail
         rateLabel.toolTip = detail + "\n" + l.text("quotaHelp") + observedDetail(planRate)
         tokenLabel.toolTip = detail + "\n" + l.text("tokensHelp") + observedDetail(tokenRate)
@@ -388,7 +435,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             extraLabels[index].stringValue = line + "\n" + rate + "\n" + (old ? l.text("stale") + " · " : "") + l.countdown(extra.window.resetsAt, now: now)
             extraLabels[index].toolTip = extraLabels[index].stringValue + "\n" + l.text("quotaHelp")
         }
-        lastFreshness = items.map { isStale($0, now: now) || ($0.window.resetsAt.map { $0 <= now } ?? false) } + [stale]
+        lastFreshness = items.map { isStale($0, now: now) || ($0.window.resetsAt.map { $0 <= now } ?? false) } + [stale, tokenStale]
         applyColors()
     }
     private func observedDetail(_ rate: Rate?) -> String {
@@ -413,8 +460,651 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         settingsWindow?.present()
     }
+
+    private func currentSourceHealth(lastSuccess: Double?, staleAfter: Double, now: Double,
+                                     enabled: Bool = true, error: String? = nil) -> SourceHealth {
+        sourceHealth(lastSuccessAt: lastSuccess, now: now, staleAfterSeconds: staleAfter,
+                     enabled: enabled, paused: client.diagnostics.suspended, errorCode: error)
+    }
+
+    private func currentTokenSourceHealth(_ state: ClientDiagnostics, now: Double,
+                                          staleAfter: Double) -> SourceHealth {
+        guard !state.suspended else { return .paused }
+        guard let account = history.account else { return .unavailable }
+        if state.lastTokenAttemptAccountKey == account, state.lastTokenErrorCode != nil { return .error }
+        guard tokenAvailable, tokenHistory.account == account,
+              state.lastTokenSuccessAccountKey == account,
+              let successAt = state.lastTokenSuccessAt else { return .unavailable }
+        return sourceHealth(lastSuccessAt: successAt, now: now, staleAfterSeconds: staleAfter)
+    }
+
+    private func sourceDiagnostics(now: Double = Date().timeIntervalSince1970) -> [SourceDiagnostic] {
+        let clientState = client.diagnostics
+        let staleAfter = client.pollInterval + 30
+        let quotaAge = clientState.lastQuotaSuccessAt.map { max(0, now - $0) }
+        let tokenSuccessMatchesAccount = history.account != nil && clientState.lastTokenSuccessAccountKey == history.account
+        let tokenAttemptMatchesAccount = history.account != nil && clientState.lastTokenAttemptAccountKey == history.account
+        let tokenSuccessAt = tokenSuccessMatchesAccount ? clientState.lastTokenSuccessAt : nil
+        let tokenAttemptAt = tokenAttemptMatchesAccount ? clientState.lastTokenAttemptAt : nil
+        let tokenError = tokenAttemptMatchesAccount ? clientState.lastTokenErrorCode : nil
+        let tokenAge = tokenSuccessAt.map { max(0, now - $0) }
+        let quota = SourceDiagnostic(id: "codex.quota",
+                                     health: currentSourceHealth(lastSuccess: clientState.lastQuotaSuccessAt,
+                                                                 staleAfter: staleAfter, now: now,
+                                                                 error: clientState.lastFailureCode),
+                                     lastAttemptAt: clientState.lastAttemptAt,
+                                     lastSuccessAt: clientState.lastQuotaSuccessAt,
+                                     ageSeconds: quotaAge, staleAfterSeconds: staleAfter,
+                                     lastErrorCode: clientState.lastFailureCode,
+                                     consecutiveFailures: clientState.consecutiveFailures,
+                                     nextAttemptAt: clientState.nextAttemptAt)
+        let tokens = SourceDiagnostic(id: "codex.accountTokens",
+                                      health: currentTokenSourceHealth(clientState, now: now, staleAfter: staleAfter),
+                                      lastAttemptAt: tokenAttemptAt,
+                                      lastSuccessAt: tokenSuccessAt,
+                                      ageSeconds: tokenAge, staleAfterSeconds: staleAfter,
+                                      lastErrorCode: tokenError,
+                                      consecutiveFailures: tokenAttemptMatchesAccount ? clientState.consecutiveTokenFailures : 0,
+                                      nextAttemptAt: clientState.nextAttemptAt)
+        func bridge(_ provider: String) -> SourceDiagnostic {
+            let snapshot = bridgeSnapshots[provider]
+            let updated = snapshot?.updatedAt
+            return SourceDiagnostic(id: "bridge.\(provider)",
+                                    health: currentSourceHealth(lastSuccess: updated, staleAfter: 300,
+                                                                now: now, enabled: settings.options.bridges,
+                                                                error: bridgeLastError[provider]),
+                                    enabled: settings.options.bridges,
+                                    lastAttemptAt: bridgeLastAttempt[provider], lastSuccessAt: updated,
+                                    ageSeconds: updated.map { max(0, now - $0) }, staleAfterSeconds: 300,
+                                    lastErrorCode: bridgeLastError[provider],
+                                    consecutiveFailures: bridgeFailureCounts[provider] ?? 0)
+        }
+        let eventStore = SourceDiagnostic(id: "local.usageEventLedger",
+                                          health: sourceHealth(lastSuccessAt: usageEventLastSuccessAt,
+                                                               now: now, staleAfterSeconds: 300,
+                                                               errorCode: usageEventLastErrorCode),
+                                          lastAttemptAt: usageEventLastAttemptAt,
+                                          lastSuccessAt: usageEventLastSuccessAt,
+                                          ageSeconds: usageEventLastSuccessAt.map { max(0, now - $0) },
+                                          staleAfterSeconds: 300,
+                                          lastErrorCode: usageEventLastErrorCode,
+                                          consecutiveFailures: usageEventConsecutiveFailures)
+        return [quota, tokens, bridge("claude"), bridge("antigravity"), bridge("cursor"), eventStore]
+    }
+
+    private func sourceTitle(_ id: String) -> String {
+        switch id {
+        case "codex.quota": return l.text("sourceCodexQuota")
+        case "codex.accountTokens": return l.text("sourceCodexTokens")
+        case "bridge.claude": return l.text("sourceClaude")
+        case "bridge.antigravity": return l.text("sourceAntigravity")
+        case "bridge.cursor": return l.text("sourceCursor")
+        case "local.usageEventLedger": return l.text("sourceUsageEventLedger")
+        default: return id
+        }
+    }
+
+    private func healthTitle(_ health: SourceHealth) -> String {
+        switch health {
+        case .fresh: return l.text("sourceFresh")
+        case .stale: return l.text("stale")
+        case .unavailable: return l.text("unavailable")
+        case .error: return l.text("sourceError")
+        case .paused: return l.text("sourcePaused")
+        case .disabled: return l.text("sourceDisabled")
+        }
+    }
+
+    private func diagnosticAge(_ seconds: Double?) -> String {
+        guard let seconds, seconds.isFinite, seconds >= 0 else { return l.text("never") }
+        if seconds < 60 { return "\(Int(seconds))s" }
+        let minutes = Int(seconds / 60)
+        if minutes < 60 { return "\(minutes)m \(Int(seconds) % 60)s" }
+        return "\(minutes / 60)h \(minutes % 60)m"
+    }
+
+    private func diagnosticsText(now: Double = Date().timeIntervalSince1970) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = l.locale; formatter.dateStyle = .short; formatter.timeStyle = .short
+        func date(_ value: Double?) -> String {
+            guard let value, value.isFinite else { return l.text("never") }
+            return formatter.string(from: Date(timeIntervalSince1970: value))
+        }
+        var lines = [l.text("sourceDiagnosticIntro"), ""]
+        for source in sourceDiagnostics(now: now) {
+            lines.append("\(sourceTitle(source.id)) · \(healthTitle(source.health))")
+            lines.append("\(l.text("dataAge")): \(diagnosticAge(source.ageSeconds)) (\(l.text("staleAfter")) \(diagnosticAge(source.staleAfterSeconds)))")
+            lines.append("\(l.text("lastAttempt")): \(date(source.lastAttemptAt)) · \(l.text("lastSuccess")): \(date(source.lastSuccessAt))")
+            var status = [String]()
+            if let next = source.nextAttemptAt { status.append("\(l.text("nextAttempt")): \(date(next))") }
+            if source.consecutiveFailures > 0 { status.append("\(l.text("failureCount")): \(source.consecutiveFailures)") }
+            if let code = source.lastErrorCode { status.append("\(l.text("errorCode")): \(l.text(code) == code ? code : l.text(code))") }
+            if !status.isEmpty { lines.append(status.joined(separator: " · ")) }
+            lines.append("")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func makeAccountSnapshot(now: Double = Date().timeIntervalSince1970) -> AccountUsageSnapshot {
+        let clientState = client.diagnostics
+        let staleAfter = client.pollInterval + 30
+        let quotaHealth = currentSourceHealth(lastSuccess: clientState.lastQuotaSuccessAt,
+                                              staleAfter: staleAfter, now: now,
+                                              error: clientState.lastFailureCode)
+        let tokenHealth = currentTokenSourceHealth(clientState, now: now, staleAfter: staleAfter)
+        let windows = codexItems.compactMap { item -> ObservedQuotaWindow? in
+            guard let used = item.window.validUsedPercent else { return nil }
+            return ObservedQuotaWindow(id: item.id, name: item.name, usedPercent: used,
+                                       windowDurationMins: item.window.windowDurationMins,
+                                       resetsAt: item.window.resetsAt)
+        }
+        let tokenTotal = tokenAvailable && tokenHistory.account == history.account &&
+            clientState.lastTokenSuccessAccountKey == history.account
+            ? tokenHistory.samples.last?.total : nil
+        let tokenObservedAt = clientState.lastTokenSuccessAccountKey == history.account
+            ? clientState.lastTokenSuccessAt : nil
+        return AccountUsageSnapshot(capturedAt: now, accountKey: history.account,
+                                    quotaObservedAt: clientState.lastQuotaSuccessAt,
+                                    quotaHealth: quotaHealth, quotaWindows: windows,
+                                    accountTokenTotal: tokenTotal,
+                                    tokenObservedAt: tokenObservedAt,
+                                    tokenHealth: tokenHealth)
+    }
+
+    @discardableResult
+    private func saveTaskData() -> Bool {
+        var saved = true
+        let files: [(String, Data?)] = [
+            ("task-ledger.json", try? JSONEncoder().encode(taskLedger)),
+            ("account-observations.json", try? JSONEncoder().encode(accountObservations))
+        ]
+        for (name, data) in files {
+            guard let data else { saved = false; continue }
+            let url = support.appendingPathComponent(name)
+            do {
+                try data.write(to: url, options: .atomic)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            } catch { saved = false }
+        }
+        return saved
+    }
+
+    private func appendBoundarySnapshot() -> String {
+        let snapshot = makeAccountSnapshot()
+        accountObservations.append(snapshot)
+        return snapshot.id
+    }
+
+    private func loadUsageEventLedger() {
+        let stateURL = support.appendingPathComponent("usage-event-state.json")
+        let stateFileExists = FileManager.default.fileExists(atPath: stateURL.path)
+        let savedState = (try? Data(contentsOf: stateURL)).flatMap { try? JSONDecoder().decode(UsageEventLedgerState.self, from: $0) }
+        var state = savedState ?? UsageEventLedgerState()
+        let eventsURL = support.appendingPathComponent("usage-events.jsonl")
+        let eventsFileExists = FileManager.default.fileExists(atPath: eventsURL.path)
+        let recent = readRecentUsageEvents(from: eventsURL, limit: UsageEventLedger.recentEventLimit)
+        if let checkpoint = recent.last(where: { $0.kind == .checkpoint })?.observation,
+           state.latestObservation == nil || checkpoint.capturedAt > (state.latestObservation?.capturedAt ?? -.infinity) {
+            state.latestObservation = checkpoint
+            state.lastCheckpointAt = checkpoint.capturedAt
+            state.lastCheckpointObservation = checkpoint
+        }
+        usageEventLedger = UsageEventLedger(state: state, recentEvents: recent)
+        let eventFileAttributes = try? FileManager.default.attributesOfItem(atPath: eventsURL.path)
+        let eventFileSize = (eventFileAttributes?[.size] as? NSNumber)?.intValue ?? 0
+        if stateFileExists, savedState != nil, savedState?.eventCount ?? 0 > 0,
+           !eventsFileExists || eventFileSize == 0 {
+            usageEventIntegrityErrorCode = "eventLogMissing"
+            usageEventLastErrorCode = usageEventIntegrityErrorCode
+            usageEventConsecutiveFailures = 1
+        } else if !stateFileExists, eventsFileExists {
+            usageEventLastErrorCode = "eventStateMissing"
+            usageEventConsecutiveFailures = 1
+        }
+        if stateFileExists {
+            if savedState != nil,
+               let attributes = try? FileManager.default.attributesOfItem(atPath: stateURL.path),
+               let modifiedAt = attributes[.modificationDate] as? Date {
+                usageEventLastSuccessAt = modifiedAt.timeIntervalSince1970
+                usageEventLastAttemptAt = modifiedAt.timeIntervalSince1970
+            } else {
+                usageEventLastErrorCode = usageEventIntegrityErrorCode ?? "eventStateUnreadable"
+                usageEventConsecutiveFailures = 1
+            }
+        } else {
+            usageEventLastSuccessAt = nil
+        }
+    }
+
+    private func readRecentUsageEvents(from url: URL, limit: Int) -> [UsageLedgerEvent] {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return [] }
+        defer { try? handle.close() }
+        let end = (try? handle.seekToEnd()) ?? 0
+        var offset = end
+        var data = Data()
+        var newlineCount = 0
+        while offset > 0 && newlineCount <= limit {
+            let count = min(UInt64(64 * 1024), offset)
+            offset -= count
+            guard (try? handle.seek(toOffset: offset)) != nil else { return [] }
+            let chunk: Data
+            do {
+                guard let bytes = try handle.read(upToCount: Int(count)) else { return [] }
+                chunk = bytes
+            } catch { return [] }
+            newlineCount += chunk.reduce(into: 0) { if $1 == 0x0A { $0 += 1 } }
+            data.insert(contentsOf: chunk, at: 0)
+        }
+        var lines = data.split(separator: 0x0A, omittingEmptySubsequences: true)
+        if offset > 0, !lines.isEmpty { lines.removeFirst() }
+        if data.last != 0x0A, !lines.isEmpty { lines.removeLast() }
+        return lines.suffix(limit).compactMap { line in
+            try? JSONDecoder().decode(UsageLedgerEvent.self, from: Data(line))
+        }
+    }
+
+    private func recordUsageObservation(account: String, tokenTotal: Double?, now: Double) {
+        guard history.account == account else {
+            recordUsageFailure(sourceID: "codex.account", errorCode: "accountIdentityMismatch",
+                               accountKey: account, now: now)
+            return
+        }
+        let state = client.diagnostics
+        let windows = codexItems.map { item in
+            UsageLedgerWindow(id: item.id, name: item.name,
+                              usedPercent: item.window.validUsedPercent,
+                              windowDurationMins: item.window.windowDurationMins,
+                              resetsAt: item.window.resetsAt)
+        }
+        let tokenMatchesAccount = tokenAvailable && tokenHistory.account == account &&
+            state.lastTokenSuccessAccountKey == account
+        let tokenError = state.lastTokenAttemptAccountKey == account ? state.lastTokenErrorCode : nil
+        let tokenHealth = currentTokenSourceHealth(state, now: now, staleAfter: client.pollInterval + 30)
+        let observation = UsageLedgerObservation(capturedAt: state.lastQuotaSuccessAt ?? now,
+                                                 accountKey: account, quotaWindows: windows,
+                                                 quotaHealth: currentSourceHealth(lastSuccess: state.lastQuotaSuccessAt,
+                                                                                  staleAfter: client.pollInterval + 30,
+                                                                                  now: now, error: state.lastFailureCode),
+                                                 quotaErrorCode: state.lastFailureCode,
+                                                 accountTokenTotal: tokenMatchesAccount ? tokenTotal : nil,
+                                                 tokenObservedAt: tokenMatchesAccount ? state.lastTokenSuccessAt : nil,
+                                                 tokenHealth: tokenHealth, tokenErrorCode: tokenError)
+        let events = usageEventLedger.observe(observation)
+        persistUsageEventChanges(events, now: now)
+    }
+
+    private func recordUsageFailure(sourceID: String, errorCode: String, accountKey: String?, now: Double) {
+        let events = usageEventLedger.recordFailure(sourceID: sourceID, timestamp: now,
+                                                    accountKey: accountKey, errorCode: errorCode)
+        persistUsageEventChanges(events, now: now)
+    }
+
+    private func persistUsageEventChanges(_ events: [UsageLedgerEvent], now: Double) {
+        usageEventLastAttemptAt = now
+        pendingUsageEventWrites.append(contentsOf: events)
+        var succeeded = true
+        do { try appendPendingUsageEvents() }
+        catch { succeeded = false; markUsageEventPersistenceFailure("eventAppendFailed") }
+        do { try saveUsageEventState() }
+        catch { succeeded = false; markUsageEventPersistenceFailure("eventStateWriteFailed") }
+        if succeeded {
+            usageEventLastErrorCode = usageEventIntegrityErrorCode
+            usageEventConsecutiveFailures = usageEventIntegrityErrorCode == nil ? 0 : 1
+            usageEventLastSuccessAt = now
+        }
+    }
+
+    private func appendPendingUsageEvents() throws {
+        guard !pendingUsageEventWrites.isEmpty else { return }
+        let url = support.appendingPathComponent("usage-events.jsonl")
+        var data = Data()
+        let encoder = JSONEncoder()
+        for event in pendingUsageEventWrites {
+            data.append(try encoder.encode(event))
+            data.append(0x0A)
+        }
+        if !FileManager.default.fileExists(atPath: url.path),
+           !FileManager.default.createFile(atPath: url.path, contents: Data(), attributes: [.posixPermissions: 0o600]) {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: data)
+        try handle.synchronize()
+        try handle.close()
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        pendingUsageEventWrites.removeAll(keepingCapacity: true)
+    }
+
+    private func saveUsageEventState() throws {
+        let url = support.appendingPathComponent("usage-event-state.json")
+        let data = try JSONEncoder().encode(usageEventLedger.state)
+        try data.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    private func markUsageEventPersistenceFailure(_ code: String) {
+        usageEventLastErrorCode = code
+        usageEventConsecutiveFailures += 1
+    }
+
+    @objc private func toggleTask() {
+        if taskLedger.activeTask == nil { startTask() } else { finishTask() }
+    }
+
+    private func startTask() {
+        let alert = NSAlert()
+        alert.messageText = l.text("startTaskTitle")
+        alert.informativeText = l.text("startTaskInfo")
+        alert.addButton(withTitle: l.text("startTask")); alert.addButton(withTitle: l.text("cancel"))
+        let values = [("taskTitleField", true), ("taskProjectField", false), ("taskIssueField", false),
+                      ("taskModelField", false), ("taskReasoningField", false)]
+        let form = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 152))
+        var fields: [NSTextField] = []
+        for (index, value) in values.enumerated() {
+            let field = NSTextField(string: "")
+            field.placeholderString = l.text(value.0)
+            field.setAccessibilityLabel(l.text(value.0))
+            let y = CGFloat(values.count - index - 1) * 29 + 3
+            field.frame = NSRect(x: 0, y: y, width: 360, height: 23)
+            form.addSubview(field); fields.append(field)
+        }
+        alert.accessoryView = form
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let title = fields[0].stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, title.count <= 500 else {
+            showMessage(title: l.text("taskTitleRequired"), details: "")
+            return
+        }
+        let snapshotID = appendBoundarySnapshot()
+        do {
+            try taskLedger.start(title: title, project: fields[1].stringValue, issue: fields[2].stringValue,
+                                 model: fields[3].stringValue, reasoning: fields[4].stringValue,
+                                 snapshotID: snapshotID, now: Date().timeIntervalSince1970)
+            let saved = saveTaskData(); setupStatus(); writeStatus()
+            if !saved { showMessage(title: l.text("taskSaveFailed"), details: "") }
+        } catch {
+            showMessage(title: l.text("taskTitleRequired"), details: "")
+        }
+    }
+
+    private func finishTask() {
+        guard taskLedger.activeTask != nil else {
+            showMessage(title: l.text("taskNoActive"), details: "")
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = l.text("finishTaskTitle")
+        alert.informativeText = l.text("finishTaskInfo")
+        alert.addButton(withTitle: l.text("finishTask")); alert.addButton(withTitle: l.text("cancel"))
+        let outcomes: [TaskOutcome] = [.accepted, .needsWork, .failed, .notRun, .interrupted, .abandoned]
+        let form = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 91))
+        let retries = NSTextField(string: "0")
+        retries.placeholderString = l.text("taskRetriesField")
+        retries.setAccessibilityLabel(l.text("taskRetriesField"))
+        retries.frame = NSRect(x: 0, y: 64, width: 360, height: 23); form.addSubview(retries)
+        let result = NSPopUpButton(frame: NSRect(x: 0, y: 34, width: 360, height: 24), pullsDown: false)
+        result.addItems(withTitles: outcomes.map { outcomeTitle($0) })
+        result.selectItem(at: outcomes.firstIndex(of: .notRun) ?? 0)
+        result.setAccessibilityLabel(l.text("taskOutcomeField")); form.addSubview(result)
+        let notes = NSTextField(string: "")
+        notes.placeholderString = l.text("taskNotesField")
+        notes.setAccessibilityLabel(l.text("taskNotesField"))
+        notes.frame = NSRect(x: 0, y: 4, width: 360, height: 23); form.addSubview(notes)
+        alert.accessoryView = form
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard let retryCount = Int(retries.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)),
+              retryCount >= 0, retryCount <= 10_000 else {
+            showMessage(title: l.text("taskRetriesField"), details: "0–10000")
+            return
+        }
+        let snapshotID = appendBoundarySnapshot()
+        do {
+            try taskLedger.finish(retries: retryCount, outcome: outcomes[result.indexOfSelectedItem],
+                                  validationNotes: notes.stringValue, snapshotID: snapshotID,
+                                  now: Date().timeIntervalSince1970)
+            let saved = saveTaskData(); setupStatus(); writeStatus()
+            if !saved { showMessage(title: l.text("taskSaveFailed"), details: "") }
+        } catch {
+            showMessage(title: l.text("taskNoActive"), details: "")
+        }
+    }
+
+    private func outcomeTitle(_ outcome: TaskOutcome) -> String {
+        switch outcome {
+        case .accepted: return l.text("outcomeAccepted")
+        case .needsWork: return l.text("outcomeNeedsWork")
+        case .failed: return l.text("outcomeFailed")
+        case .notRun: return l.text("outcomeNotRun")
+        case .interrupted: return l.text("outcomeInterrupted")
+        case .abandoned: return l.text("outcomeAbandoned")
+        }
+    }
+
+    private func taskDuration(_ seconds: Double?) -> String {
+        guard let seconds, seconds.isFinite, seconds >= 0 else { return l.text("taskActiveLabel") }
+        let whole = Int(seconds)
+        if whole < 60 { return "\(whole)s" }
+        if whole < 3600 { return "\(whole / 60)m \(whole % 60)s" }
+        return "\(whole / 3600)h \(whole % 3600 / 60)m"
+    }
+
+    private func periodSnapshotSummary(for record: TaskRecord) -> String {
+        let start = accountObservations.snapshot(id: record.startSnapshotID)
+        let end = accountObservations.snapshot(id: record.endSnapshotID)
+        guard end != nil else { return "\(l.text("periodAccountChange")): \(l.text("observationUnavailable"))" }
+        if let start, let end, let first = start.accountKey, let last = end.accountKey, first != last {
+            return "\(l.text("periodAccountChange")): \(l.text("accountChanged"))"
+        }
+        let ids = Set((start?.quotaWindows ?? []).map(\.id)).intersection((end?.quotaWindows ?? []).map(\.id)).sorted()
+        let values = ids.compactMap { id -> String? in
+            let title = end?.quotaWindows.first(where: { $0.id == id })?.name ?? id
+            switch observedQuotaChange(from: start, to: end, windowID: id) {
+            case .change(let delta):
+                let sign = delta > 0 ? "+" : ""
+                return "\(title) \(sign)\(l.number(delta)) pp"
+            case .reset: return "\(title): \(l.text("windowResetDuringTask"))"
+            case .accountChanged: return l.text("accountChanged")
+            case .unavailable: return nil
+            }
+        }
+        let quota = values.isEmpty ? l.text("observationUnavailable") : values.joined(separator: ", ")
+        var lines = ["\(l.text("periodAccountChange")): \(quota)"]
+        let reached = ids.filter { id in
+            guard case .change = observedQuotaChange(from: start, to: end, windowID: id),
+                  let first = start?.quotaWindows.first(where: { $0.id == id })?.usedPercent,
+                  let last = end?.quotaWindows.first(where: { $0.id == id })?.usedPercent else { return false }
+            return first < 100 && last >= 100
+        }
+        if !reached.isEmpty { lines.append("\(l.text("windowReachedDuringTask")): \(reached.joined(separator: ", "))") }
+        switch observedTokenCounterChange(from: start, to: end) {
+        case .change(let delta):
+            let sign = delta > 0 ? "+" : ""
+            lines.append("\(l.text("periodAccountTokenChange")): \(sign)\(l.compact(delta))")
+        case .reset: lines.append("\(l.text("periodAccountTokenChange")): \(l.text("windowResetDuringTask"))")
+        case .accountChanged: lines.append("\(l.text("periodAccountTokenChange")): \(l.text("accountChanged"))")
+        case .unavailable: break
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    @objc private func showTaskHistory() {
+        guard !taskLedger.records.isEmpty else {
+            showMessage(title: l.text("taskHistory"), details: l.text("taskHistoryEmpty")); return
+        }
+        let formatter = DateFormatter()
+        formatter.locale = l.locale; formatter.dateStyle = .short; formatter.timeStyle = .short
+        let now = Date().timeIntervalSince1970
+        let recent = taskLedger.records.suffix(25).reversed()
+        let blocks = recent.map { record -> String in
+            let project = [record.project, record.issue].compactMap { $0 }.joined(separator: " · ")
+            let model = [record.model, record.reasoning].compactMap { $0 }.joined(separator: " · ")
+            let result = record.outcome.map(outcomeTitle) ?? l.text("taskActiveLabel")
+            let elapsed = record.durationSeconds ?? max(0, now - record.startedAt)
+            var parts = ["\(record.title)", "\(formatter.string(from: Date(timeIntervalSince1970: record.startedAt))) · \(l.text("taskDuration")): \(taskDuration(elapsed))",
+                         "\(l.text("taskOutcomeLabel")): \(result) · \(l.text("taskRetriesLabel")): \(record.retries.map(String.init) ?? "—")"]
+            if !project.isEmpty { parts.append(project) }
+            if !model.isEmpty { parts.append(model) }
+            if record.endedAt != nil { parts.append(periodSnapshotSummary(for: record)) }
+            if let notes = record.validationNotes { parts.append(notes) }
+            parts.append(record.attributedSessionTokens.map { "Session tokens: \(l.compact($0))" } ?? l.text("taskSessionUsageUnavailable"))
+            return parts.joined(separator: "\n")
+        }
+        showMessage(title: l.text("taskHistory"), details: blocks.joined(separator: "\n\n──────────\n\n"))
+    }
+
+    private func eventValue(_ value: Double?, sourceID: String) -> String {
+        guard let value, value.isFinite else { return l.text("unavailable") }
+        return sourceID == "codex.accountTokens" ? l.compact(value) : l.number(value, decimals: 1) + "%"
+    }
+
+    private func usageEventDescription(_ event: UsageLedgerEvent) -> String {
+        let subject = event.windowName ?? event.windowID ?? sourceTitle(event.sourceID)
+        let transition = "\(eventValue(event.previousValue, sourceID: event.sourceID)) → \(eventValue(event.currentValue, sourceID: event.sourceID))"
+        switch event.kind {
+        case .checkpoint:
+            guard let observation = event.observation else { return l.text("eventCheckpoint") }
+            var values = observation.quotaWindows.map { window in
+                "\(window.name): \(eventValue(window.usedPercent, sourceID: "codex.quota"))"
+            }
+            if let previous = event.previousObservation,
+               previous.accountKey == observation.accountKey,
+               previous.quotaHealth == .fresh, observation.quotaHealth == .fresh {
+                let oldWindows = Dictionary(previous.quotaWindows.map { ($0.id, $0) },
+                                            uniquingKeysWith: { first, _ in first })
+                let changes = observation.quotaWindows.compactMap { window -> String? in
+                    guard let old = oldWindows[window.id],
+                          let oldValue = old.usedPercent, let newValue = window.usedPercent,
+                          old.windowDurationMins == window.windowDurationMins,
+                          abs((old.resetsAt ?? 0) - (window.resetsAt ?? 0)) <= 60,
+                          newValue >= oldValue else { return nil }
+                    let delta = newValue - oldValue
+                    let sign = delta > 0 ? "+" : ""
+                    return "\(window.name) \(sign)\(l.number(delta)) pp"
+                }
+                if !changes.isEmpty {
+                    values.append("\(l.text("eventSincePriorCheckpoint")): \(changes.joined(separator: ", "))")
+                }
+                if previous.tokenHealth == .fresh, observation.tokenHealth == .fresh,
+                   let oldTotal = previous.accountTokenTotal, let newTotal = observation.accountTokenTotal,
+                   newTotal >= oldTotal {
+                    let delta = newTotal - oldTotal
+                    let sign = delta > 0 ? "+" : ""
+                    values.append("\(l.text("eventAccountTokens")): \(sign)\(l.compact(delta))")
+                }
+            }
+            if let tokens = observation.accountTokenTotal {
+                values.append("\(l.text("eventAccountTokenTotal")): \(l.compact(tokens))")
+            }
+            return l.text("eventCheckpoint") + " · " + (values.isEmpty ? l.text("unavailable") : values.joined(separator: ", "))
+        case .dataGap:
+            return "\(l.text("eventDataGap")) · \(taskDuration(event.gapSeconds))"
+        case .accountSwitch:
+            return l.text("eventAccountSwitch")
+        case .windowReset:
+            return "\(l.text("eventWindowReset")) · \(subject) · \(transition)"
+        case .sourceCorrection:
+            return "\(l.text("eventSourceCorrection")) · \(subject) · \(transition)"
+        case .windowUnavailable:
+            return "\(l.text("eventWindowUnavailable")) · \(subject)"
+        case .windowRestored:
+            return "\(l.text("eventWindowRestored")) · \(subject) · \(eventValue(event.currentValue, sourceID: event.sourceID))"
+        case .sourceFailure:
+            let code = event.detailCode.map { l.text($0) } ?? l.text("sourceError")
+            return "\(l.text("eventSourceFailure")) · \(sourceTitle(event.sourceID)) · \(code)"
+        case .sourceRecovered:
+            return "\(l.text("eventSourceRecovered")) · \(sourceTitle(event.sourceID))"
+        }
+    }
+
+    @objc private func showUsageEventHistory() {
+        guard !usageEventLedger.recentEvents.isEmpty else {
+            showMessage(title: l.text("usageEventHistory"), details: l.text("usageEventHistoryEmpty")); return
+        }
+        let formatter = DateFormatter()
+        formatter.locale = l.locale; formatter.dateStyle = .short; formatter.timeStyle = .short
+        let blocks = usageEventLedger.recentEvents.suffix(30).reversed().map { event in
+            "\(formatter.string(from: Date(timeIntervalSince1970: event.timestamp))) · \(usageEventDescription(event))"
+        }
+        showMessage(title: l.text("usageEventHistory"), details: blocks.joined(separator: "\n\n──────────\n\n"))
+    }
+
+    @objc private func exportUsageEvents() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "codex-usage-events.jsonl"
+        panel.message = l.text("usageEventExportPrompt")
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        persistUsageEventChanges([], now: Date().timeIntervalSince1970)
+        let source = support.appendingPathComponent("usage-events.jsonl")
+        var temporaryURL: URL?
+        defer {
+            if let temporaryURL, FileManager.default.fileExists(atPath: temporaryURL.path) {
+                try? FileManager.default.removeItem(at: temporaryURL)
+            }
+        }
+        do {
+            if !FileManager.default.fileExists(atPath: source.path) {
+                _ = FileManager.default.createFile(atPath: source.path, contents: Data(), attributes: [.posixPermissions: 0o600])
+            }
+            if source.standardizedFileURL != url.standardizedFileURL {
+                let temporary = url.deletingLastPathComponent()
+                    .appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
+                temporaryURL = temporary
+                try FileManager.default.copyItem(at: source, to: temporary)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: temporary.path)
+                if FileManager.default.fileExists(atPath: url.path) {
+                    _ = try FileManager.default.replaceItemAt(url, withItemAt: temporary)
+                } else {
+                    try FileManager.default.moveItem(at: temporary, to: url)
+                }
+            }
+            showMessage(title: l.text("usageEventExported"), details: url.lastPathComponent)
+        } catch {
+            showMessage(title: l.text("usageEventExportFailed"), details: "")
+        }
+    }
+
+    @objc private func exportTaskLedger() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "codex-task-ledger.json"
+        panel.message = l.text("taskExportPrompt")
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let export = TaskLedgerExport(exportedAt: Date().timeIntervalSince1970,
+                                      taskLedger: taskLedger, accountObservations: accountObservations)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        do {
+            try encoder.encode(export).write(to: url, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            showMessage(title: l.text("taskExported"), details: url.lastPathComponent)
+        } catch {
+            showMessage(title: l.text("taskExportFailed"), details: "")
+        }
+    }
+
+    @objc private func showSourceDiagnostics() {
+        showMessage(title: l.text("sourceDiagnostics"), details: diagnosticsText())
+    }
+
+    private func showMessage(title: String, details: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = details
+        alert.addButton(withTitle: l.text("ok"))
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
+
     private func writeStatus() {
-        var data: [String: Any] = ["schemaVersion": 2, "stale": current.map { isStale($0, now: Date().timeIntervalSince1970) } ?? stale, "collapsed": collapsed, "pinned": pinned,
+        let now = Date().timeIntervalSince1970
+        var data: [String: Any] = ["schemaVersion": 4, "stale": current.map { isStale($0, now: now) } ?? stale, "collapsed": collapsed, "pinned": pinned,
             "visible": panel?.isVisible ?? false, "pid": ProcessInfo.processInfo.processIdentifier,
             "windows": items.map { ["id": $0.id, "title": title(for: $0)] },
             "frame": NSStringFromRect(panel?.frame ?? .zero)]
@@ -434,9 +1124,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         data["rateUnit"] = settings.rateUnit.rawValue
         data["planType"] = current?.planType
         if let current, let provider = providerFor(current) { data["lastUpdate"] = bridgeSnapshots[provider]?.updatedAt }
-        data["tokenRatePerHour"] = stale || !tokenAvailable ? nil : tokenHistory.rate(now: Date().timeIntervalSince1970, lookback: settings.lookback)?.perHour
+        let state = client.diagnostics
+        data["lastAttemptAt"] = state.lastAttemptAt
+        data["lastQuotaSuccessAt"] = state.lastQuotaSuccessAt
+        data["lastTokenAttemptAt"] = state.lastTokenAttemptAt
+        data["lastTokenSuccessAt"] = state.lastTokenSuccessAt
+        data["tokenErrorCode"] = state.lastTokenErrorCode
+        data["nextAttemptAt"] = state.nextAttemptAt
+        data["consecutiveFailures"] = state.consecutiveFailures
+        let sourceData = sourceDiagnostics(now: now).reduce(into: [String: [String: Any]]()) { result, source in
+            var entry: [String: Any] = ["health": source.health.rawValue, "enabled": source.enabled,
+                                        "staleAfterSeconds": source.staleAfterSeconds,
+                                        "consecutiveFailures": source.consecutiveFailures]
+            if let value = source.lastAttemptAt { entry["lastAttemptAt"] = value }
+            if let value = source.lastSuccessAt { entry["lastSuccessAt"] = value }
+            if let value = source.ageSeconds { entry["ageSeconds"] = value }
+            if let value = source.lastErrorCode { entry["lastErrorCode"] = value }
+            if let value = source.nextAttemptAt { entry["nextAttemptAt"] = value }
+            result[source.id] = entry
+        }
+        data["sources"] = sourceData
+        data["taskRecordCount"] = taskLedger.records.count
+        data["usageEventCount"] = usageEventLedger.state.eventCount
+        if let task = taskLedger.activeTask {
+            var active: [String: Any] = ["id": task.id, "title": task.title, "startedAt": task.startedAt]
+            active["project"] = task.project; active["issue"] = task.issue
+            active["model"] = task.model; active["reasoning"] = task.reasoning
+            data["activeTask"] = active
+        } else { data["activeTask"] = NSNull() }
+        let tokenIsStale = !tokenAvailable || state.lastTokenSuccessAt.map { now - $0 > client.pollInterval + 30 } ?? true
+        data["tokenRatePerHour"] = tokenIsStale ? nil : tokenHistory.rate(now: Date().timeIntervalSince1970, lookback: settings.lookback)?.perHour
         data["tokenAvailable"] = tokenAvailable
-        data["ratePerHour"] = current.flatMap { (isStale($0, now: Date().timeIntervalSince1970) || ($0.window.resetsAt.map { $0 <= Date().timeIntervalSince1970 } ?? false)) ? nil : cachedRates[$0.id]?.perHour }
+        data["ratePerHour"] = current.flatMap { (isStale($0, now: now) || ($0.window.resetsAt.map { $0 <= now } ?? false)) ? nil : cachedRates[$0.id]?.perHour }
         data["planRatePerHour"] = data["ratePerHour"]
         if let bytes = try? JSONSerialization.data(withJSONObject: data, options: [.prettyPrinted, .sortedKeys]) {
             try? bytes.write(to: support.appendingPathComponent("status.json"), options: .atomic)
@@ -480,7 +1199,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func windowDidMove(_ notification: Notification) { if !adjustingFrame { savePosition(); writeStatus() } }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showPanel(); return false }
     func applicationWillTerminate(_ notification: Notification) {
-        tick?.invalidate(); bridgeTick?.invalidate(); client.stop(); flock(lockFD, LOCK_UN); close(lockFD)
+        tick?.invalidate(); bridgeTick?.invalidate()
+        persistUsageEventChanges([], now: Date().timeIntervalSince1970)
+        client.stop(); flock(lockFD, LOCK_UN); close(lockFD)
     }
 }
 let app = NSApplication.shared

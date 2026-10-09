@@ -10,12 +10,19 @@ In `~/Library/Application Support/CodexUsageWidget/`:
 
 - `history.json`: quota samples and a hashed account identifier.
 - `tokens.json`: cumulative token samples and a hashed account identifier.
-- `status.json`: current widget diagnostics, selected plan/window, and operational settings.
+- `status.json`: current widget diagnostics, selected plan/window, operational settings, and the active task's title and optional project/issue/model labels.
+- `task-ledger.json`: manually entered Codex task metadata, elapsed-time boundaries, retry counts, outcomes, and validation notes.
+- `account-observations.json`: quota and account-token snapshots captured at task boundaries, kept separate from task-attributed usage.
+- `usage-events.jsonl` and `usage-event-state.json`: append-only account-level quota/token checkpoints and source events, plus the latest checkpoint used to detect data gaps.
 - `instance.lock`: prevents duplicate processes.
 
 Language, observation duration, rate unit, position, and collapse/pin preferences are stored in the app's defaults domain. Account email/id is used in memory to derive an identifier; raw credentials are never persisted by the widget.
 
 Histories are trimmed to a 31-day horizon when samples are collected. Resets, counter corrections, plan/account changes, or gaps over 5 minutes can clear the affected observation segment earlier. If the widget is stopped or offline, existing files remain until collection resumes or the user removes them.
+
+The task ledger is local and manual. It stores user-entered task titles, project/issue references, model/reasoning labels, retries, outcomes, and notes; the account observation file stores quota percentages, reset times, a hashed account key, and the reported account-wide token total at task start/end. These observations are not described as task consumption. The app keeps up to 5,000 task records and 10,000 task-boundary snapshots.
+
+The usage event log has no automatic expiry in this prototype. It stores a 15-minute account checkpoint while polling is active, plus gap, account-switch, reset, source-correction, failure, and recovery events. It contains timestamps, quota values, the reported account-wide token total, source error codes, and hashed account keys; it contains no prompts or transcripts. **Export usage events…** copies the complete JSON Lines file to a user-selected location. Review it before sharing because it can reveal account usage patterns. Deleting the Application Support directory removes the local event log.
 
 To delete collected data, quit the widget and remove its Application Support directory. Preferences can be removed separately using the macOS defaults domain `local.codex.usage-widget`.
 

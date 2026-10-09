@@ -41,10 +41,11 @@ final class CustomizationTests: XCTestCase {
         XCTAssertFalse(snapshot.isValid(now: 990, expectedProvider: "claude"))
         XCTAssertEqual(snapshot.limits.windows().first?.window.usedPercent, 25)
     }
-    func testPrimaryInterfaceTranslationsAndPercentNotation() {
+    func testPrimaryInterfaceHasTextOrFallbackForEveryKeyAndPercentNotation() {
         for language in WidgetLanguage.allCases where language != .system {
             for key in L10n.table.keys {
-                XCTAssertNotNil(L10n.table[key]?[language.rawValue], "\(language.rawValue): \(key)")
+                let resolved = L10n.table[key]?[language.rawValue] ?? (featureTranslations[key] == nil ? nil : L10n.table[key]?["en"])
+                XCTAssertNotNil(resolved, "\(language.rawValue): \(key)")
             }
             XCTAssertEqual(L10n(language).text("points"), "%")
         }

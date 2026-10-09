@@ -16,9 +16,10 @@ Unofficial community project. Not affiliated with or endorsed by OpenAI, Anthrop
 - Optional Claude Code and Antigravity CLI status-line bridges; Cursor Teams on-demand spend-cap collector. [Provider support and setup](docs/providers.md)
 - Observation window: **1 minute to 30 days**, entered as a whole number of minutes, hours, or days.
 - Independent rate display unit: per minute, hour, or day.
-- English, Traditional/Simplified Chinese, Japanese, Korean, Spanish, French, German, Brazilian Portuguese, Italian, or follow the system language. Translations are included for all interface keys; native-speaker review is welcome.
+- English, Traditional/Simplified Chinese, Japanese, Korean, Spanish, French, German, Brazilian Portuguese, Italian, or follow the system language. New task/diagnostic labels are translated in English and Chinese and fall back to English in the other languages.
 - Actual backend quota windows and plan names, including distinct model buckets when available.
 - Local sample history, saved position/settings, stale-data indicators, automatic reconnection, and manual startup.
+- Source diagnostics for Codex and optional bridges; a long-term account usage event ledger for gaps, account switches, resets, and source corrections; and local task records with verification outcomes. Task-specific token attribution stays unavailable unless a source can directly identify a session.
 
 ## Build and install
 
@@ -42,6 +43,8 @@ Then build and launch:
 The app is installed at `~/Applications/Codex Usage Widget.app`. Reopening it reveals the existing instance. It does not enable login startup. Use the menu bar item to hide/show, refresh, pin, or quit.
 
 Click the **gear** to configure language, observation window, rate units, additional quotas, RGB colors, energy saving, and provider imports, then **Apply**. Click the card title to select a quota window. Drag blank space to move the card. Hover over each rate for its source and actual observed duration.
+
+Use the menu bar item to open **Source diagnostics…**, start or finish a Codex task record, review task/event history, or export either ledger. Account-wide quota and token observations stay separate from task consumption; see [the prototype notes](docs/task-ledger.md).
 
 A Codex plugin manifest and launch skill are included. See [Codex plugin setup](docs/plugin.md).
 

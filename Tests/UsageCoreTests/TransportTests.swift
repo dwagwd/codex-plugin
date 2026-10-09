@@ -56,11 +56,17 @@ final class TransportTests: XCTestCase {
         client.onResult = { response, account in
             XCTAssertEqual(response.windows().first?.window.usedPercent, 25)
             XCTAssertEqual(account.count, 64)
+            XCTAssertNotNil(client.diagnostics.lastAttemptAt)
+            XCTAssertNotNil(client.diagnostics.lastQuotaSuccessAt)
             received.fulfill()
         }
         client.onFailure = { XCTFail($0) }
         client.refresh()
         wait(for: [received, tokens], timeout: 5)
+        XCTAssertNotNil(client.diagnostics.lastTokenSuccessAt)
+        XCTAssertEqual(client.diagnostics.lastTokenAttemptAccountKey, client.diagnostics.lastTokenSuccessAccountKey)
+        XCTAssertNotNil(client.diagnostics.lastTokenSuccessAccountKey)
+        XCTAssertNil(client.diagnostics.lastTokenErrorCode)
         let pid = Int32(try String(contentsOf: dir.appendingPathComponent("pid")))!
         client.stop()
         XCTAssertEqual(kill(pid, 0), -1)
@@ -109,7 +115,14 @@ final class TransportTests: XCTestCase {
             }
             client.onTokens = { value, _ in XCTAssertNil(value); tokens.fulfill() }
             client.onFailure = { XCTFail("Optional tokens must not invalidate quota: " + $0) }
-            client.refresh(); wait(for: [quota, tokens], timeout: 4); client.stop()
+            client.refresh(); wait(for: [quota, tokens], timeout: 4)
+            XCTAssertNotNil(client.diagnostics.lastQuotaSuccessAt)
+            XCTAssertNil(client.diagnostics.lastTokenSuccessAt)
+            XCTAssertNotNil(client.diagnostics.lastTokenErrorCode)
+            XCTAssertEqual(client.diagnostics.consecutiveTokenFailures, 1)
+            XCTAssertNotNil(client.diagnostics.lastTokenAttemptAccountKey)
+            XCTAssertNil(client.diagnostics.lastTokenSuccessAccountKey)
+            client.stop()
         }
     }
 
