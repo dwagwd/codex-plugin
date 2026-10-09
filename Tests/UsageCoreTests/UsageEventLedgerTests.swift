@@ -126,4 +126,14 @@ final class UsageEventLedgerTests: XCTestCase {
         XCTAssertFalse(events.contains { $0.kind == .sourceRecovered && $0.sourceID == "codex.accountTokens" })
         XCTAssertNil(ledger.state.activeFailures["codex.accountTokens"])
     }
+
+    func testAccountIdentityMismatchRecoversOnNextAcceptedObservation() {
+        var ledger = UsageEventLedger()
+        _ = ledger.observe(observation(1_000))
+        XCTAssertEqual(ledger.recordFailure(sourceID: "codex.account", timestamp: 1_060, accountKey: "account-A",
+                                            errorCode: "accountIdentityMismatch").map(\.kind), [.sourceFailure])
+        let recovered = ledger.observe(observation(1_120))
+        XCTAssertTrue(recovered.contains { $0.kind == .sourceRecovered && $0.sourceID == "codex.account" })
+        XCTAssertNil(ledger.state.activeFailures["codex.account"])
+    }
 }

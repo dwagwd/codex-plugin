@@ -239,6 +239,11 @@ public struct UsageEventLedger: Equatable {
             forceCheckpoint = true
             comparisonUnsafe = true
         }
+        // An accepted observation means quota and token identities matched again.
+        if recover("codex.account", at: normalized.capturedAt, accountKey: normalized.accountKey, into: &generated) {
+            forceCheckpoint = true
+            comparisonUnsafe = true
+        }
         if normalized.tokenHealth == .fresh, recover("codex.accountTokens", at: normalized.capturedAt,
                                                       accountKey: normalized.accountKey, into: &generated) {
             forceCheckpoint = true

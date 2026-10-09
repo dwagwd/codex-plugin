@@ -51,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var accountObservations = AccountObservationLedger()
     private var usageEventLedger = UsageEventLedger()
     private var pendingUsageEventWrites: [UsageLedgerEvent] = []
+    private let maxPendingUsageEventWrites = 1_000
     private var usageEventLastAttemptAt: Double?
     private var usageEventLastSuccessAt: Double?
     private var usageEventLastErrorCode: String?
@@ -109,8 +110,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
            let saved = try? JSONDecoder().decode(History.self, from: data) { history = saved }
         if let data = defaults.data(forKey: "settings"), let decoded = try? JSONDecoder().decode(WidgetSettings.self, from: data), decoded.isValid { settings = decoded }
         if let data = try? Data(contentsOf: support.appendingPathComponent("tokens.json")), let saved = try? JSONDecoder().decode(TokenHistory.self, from: data) { tokenHistory = saved }
-        if let data = try? Data(contentsOf: support.appendingPathComponent("task-ledger.json")), let saved = try? JSONDecoder().decode(TaskLedger.self, from: data) { taskLedger = saved }
-        if let data = try? Data(contentsOf: support.appendingPathComponent("account-observations.json")), let saved = try? JSONDecoder().decode(AccountObservationLedger.self, from: data) { accountObservations = saved }
+        if let saved = loadPrivateLedger(TaskLedger.self, named: "task-ledger.json") { taskLedger = saved }
+        if let saved = loadPrivateLedger(AccountObservationLedger.self, named: "account-observations.json") { accountObservations = saved }
         loadUsageEventLedger()
         client.pollInterval = settings.options.energySaver ? 120 : 60
         setupPanel(); setupStatus()
@@ -618,6 +619,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                     tokenHealth: tokenHealth)
     }
 
+    /// Decodes a ledger file. An unreadable file is moved aside instead of being overwritten by an empty ledger on the next save.
+    private func loadPrivateLedger<T: Decodable>(_ type: T.Type, named name: String) -> T? {
+        let url = support.appendingPathComponent(name)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        if let data = try? Data(contentsOf: url), let saved = try? JSONDecoder().decode(type, from: data) { return saved }
+        let stamp = Int(Date().timeIntervalSince1970)
+        let aside = support.appendingPathComponent(url.deletingPathExtension().lastPathComponent + ".corrupt-\(stamp)." + url.pathExtension)
+        try? FileManager.default.moveItem(at: url, to: aside)
+        return nil
+    }
+
     @discardableResult
     private func saveTaskData() -> Bool {
         var saved = true
@@ -749,6 +761,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func persistUsageEventChanges(_ events: [UsageLedgerEvent], now: Double) {
         usageEventLastAttemptAt = now
         pendingUsageEventWrites.append(contentsOf: events)
+        if pendingUsageEventWrites.count > maxPendingUsageEventWrites {
+            pendingUsageEventWrites.removeFirst(pendingUsageEventWrites.count - maxPendingUsageEventWrites)
+        }
         var succeeded = true
         do { try appendPendingUsageEvents() }
         catch { succeeded = false; markUsageEventPersistenceFailure("eventAppendFailed") }
@@ -774,13 +789,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
            !FileManager.default.createFile(atPath: url.path, contents: Data(), attributes: [.posixPermissions: 0o600]) {
             throw CocoaError(.fileWriteUnknown)
         }
-        let handle = try FileHandle(forWritingTo: url)
-        try handle.seekToEnd()
-        try handle.write(contentsOf: data)
-        try handle.synchronize()
-        try handle.close()
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        let handle = try FileHandle(forUpdating: url)
+        defer { try? handle.close() }
+        let originalSize = try handle.seekToEnd()
+        // Terminate a line left partial by an interrupted earlier write so the next event stays decodable.
+        if originalSize > 0 {
+            try handle.seek(toOffset: originalSize - 1)
+            if try handle.read(upToCount: 1) != Data([0x0A]) { data.insert(0x0A, at: 0) }
+            try handle.seek(toOffset: originalSize)
+        }
+        do { try handle.write(contentsOf: data) }
+        catch { try? handle.truncate(atOffset: originalSize); throw error }
         pendingUsageEventWrites.removeAll(keepingCapacity: true)
+        try handle.synchronize()
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     private func saveUsageEventState() throws {
@@ -956,7 +978,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if !model.isEmpty { parts.append(model) }
             if record.endedAt != nil { parts.append(periodSnapshotSummary(for: record)) }
             if let notes = record.validationNotes { parts.append(notes) }
-            parts.append(record.attributedSessionTokens.map { "Session tokens: \(l.compact($0))" } ?? l.text("taskSessionUsageUnavailable"))
+            parts.append(record.attributedSessionTokens.map { l.text("taskSessionTokens") + ": " + l.compact($0) } ?? l.text("taskSessionUsageUnavailable"))
             return parts.joined(separator: "\n")
         }
         showMessage(title: l.text("taskHistory"), details: blocks.joined(separator: "\n\n──────────\n\n"))
