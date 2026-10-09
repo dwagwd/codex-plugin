@@ -17,6 +17,24 @@
 - Review the license, project description, screenshots, and source archive for personal data.
 - The first public release is source-only. Do not upload the locally built ad-hoc-signed App ZIP as a ready-to-install release asset. Apple signing/notarization and download-install testing are prerequisites for official prebuilt binaries.
 
+## Signed, notarized app builds
+
+One-time setup on the release Mac:
+
+1. Create a **Developer ID Application** certificate (Xcode → Settings → Accounts → Manage Certificates → + → Developer ID Application). Only the team's Account Holder can create it. `Apple Development` and `Apple Distribution` certificates cannot be used outside the Mac App Store.
+2. Save notarization credentials in the keychain: `xcrun notarytool store-credentials codex-widget --apple-id <Apple ID> --team-id <team ID>` and enter an app-specific password from appleid.apple.com.
+
+Then build a universal, signed, notarized, stapled app ZIP:
+
+```sh
+CODEX_WIDGET_UNIVERSAL=1 \
+CODEX_WIDGET_SIGN_IDENTITY="Developer ID Application: <name> (<team ID>)" \
+CODEX_WIDGET_NOTARY_PROFILE=codex-widget \
+./scripts/package.sh
+```
+
+The script stops if notarization fails and checks the result with `spctl`. It prints the ZIP's SHA-256 for the release notes and the Homebrew cask ([template](homebrew-cask.rb)). Download the uploaded ZIP on a second Mac and open it once before announcing the release.
+
 ## Publication
 
 The `Package artifacts` workflow is manual and only uploads build artifacts. It does not publish a GitHub release, create tags, or push source. Create version tags/releases only when the maintainer explicitly chooses to publish. Do not embed local marketplace paths in public instructions.

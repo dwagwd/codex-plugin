@@ -7,8 +7,11 @@ export GIT_CEILING_DIRECTORIES="$(dirname "$PLUGIN_ROOT")"
 BUILD_CACHE="${CODEX_WIDGET_BUILD_CACHE:-$HOME/Library/Caches/CodexUsageWidget/build}"
 DIST_DIR="${CODEX_WIDGET_DIST_DIR:-$HOME/Library/Caches/CodexUsageWidget/dist}"
 APP_VERSION="$(cat "$PLUGIN_ROOT/VERSION")"
-swift build --scratch-path "$BUILD_CACHE" -c release --disable-index-store --jobs 2
-BIN_DIR="$(swift build --scratch-path "$BUILD_CACHE" -c release --show-bin-path)"
+# CODEX_WIDGET_UNIVERSAL=1 builds one arm64 + x86_64 binary (needs Xcode, not only the CLT).
+ARCH_FLAGS=()
+if [ "${CODEX_WIDGET_UNIVERSAL:-0}" = "1" ]; then ARCH_FLAGS=(--arch arm64 --arch x86_64); fi
+swift build --scratch-path "$BUILD_CACHE" -c release --disable-index-store --jobs 2 ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"}
+BIN_DIR="$(swift build --scratch-path "$BUILD_CACHE" -c release --show-bin-path ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"})"
 APP="$DIST_DIR/Codex Usage Widget.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/CodexUsageWidget" "$APP/Contents/MacOS/CodexUsageWidget"
@@ -29,5 +32,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict></plist>
 PLIST
-codesign --force --sign - "$APP"
+# Ad-hoc by default. Set CODEX_WIDGET_SIGN_IDENTITY to a "Developer ID Application" identity
+# to sign with the hardened runtime and a secure timestamp, as notarization requires.
+if [ -n "${CODEX_WIDGET_SIGN_IDENTITY:-}" ]; then
+  codesign --force --options runtime --timestamp --sign "$CODEX_WIDGET_SIGN_IDENTITY" "$APP"
+else
+  codesign --force --sign - "$APP"
+fi
 echo "Built: $APP"

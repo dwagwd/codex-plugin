@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Release tooling: optional universal (arm64 + x86_64) builds, Developer ID signing with the hardened runtime, notarization and stapling in `package.sh`, and a Homebrew cask template.
 - Add optional quota alerts (off by default): a system notification once per reset cycle when a quota reaches 90% or would run out before reset at the current pace.
 - Archive the usage event log at 20 MB as `usage-events-<UTC time>.jsonl`; exports include archives.
 - Keep unreadable task/observation ledgers as `*.corrupt-<time>.json` instead of overwriting them; repair torn JSONL lines, roll back failed appends, and cap the unsent event buffer.
