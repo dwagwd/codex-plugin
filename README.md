@@ -14,6 +14,7 @@ Unofficial community project. Not affiliated with or endorsed by OpenAI, Anthrop
 - Custom text/background RGB values (0–255) or automatic system appearance.
 - Energy saver: 120-second network polling and 15-second display updates. Hidden cards stop the UI timer; rate calculations are cached until new samples arrive.
 - Optional Claude Code and Antigravity CLI status-line bridges; Cursor Teams on-demand spend-cap collector. [Provider support and setup](docs/providers.md)
+- Pace forecast: hover the quota rate to see the projected usage at reset, or how long until 100% at the current pace. The rate turns orange when the window would run out before it resets. This is a linear projection, not a promise.
 - Observation window: **1 minute to 30 days**, entered as a whole number of minutes, hours, or days.
 - Independent rate display unit: per minute, hour, or day.
 - English, Traditional/Simplified Chinese, Japanese, Korean, Spanish, French, German, Brazilian Portuguese, Italian, or follow the system language. New task/diagnostic labels are translated in English and Chinese and fall back to English in the other languages.

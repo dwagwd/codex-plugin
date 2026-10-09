@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add a pace forecast: the quota rate tooltip shows the projected usage at reset, or when the window reaches 100% first; the rate turns orange when it would run out before reset, and `status.json` exposes `forecast`.
 - Add per-source freshness diagnostics with last attempt/success times, data age, retries, and bridge snapshot errors.
 - Add a local Codex task ledger for task metadata, elapsed time, retries, and verification outcome.
 - Add an append-only usage event ledger with account checkpoints, data gaps, account switches, quota resets, source corrections, and source recovery events.

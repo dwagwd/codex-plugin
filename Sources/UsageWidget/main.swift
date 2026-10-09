@@ -410,7 +410,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             (item?.window.resetsAt.map { $0 > now } ?? false ? l.text("reset") + " " : "") + l.countdown(item?.window.resetsAt, now: now)
         rateLabel.stringValue = rateText(planRate, metric: "quota", unavailable: planUnavailable)
         tokenLabel.stringValue = "Codex · " + rateText(tokenRate, metric: "tokens", unavailable: tokenStale)
-        rateLabel.textColor = planUnavailable ? .secondaryLabelColor : .labelColor
+        let forecast = planUnavailable ? nil : forecastQuota(used: item?.window.validUsedPercent, perHour: planRate?.perHour, resetsAt: item?.window.resetsAt, now: now)
+        rateLabel.textColor = planUnavailable ? .secondaryLabelColor : (forecast?.outlook == .exhausts ? .systemOrange : .labelColor)
         tokenLabel.textColor = tokenStale ? .secondaryLabelColor : .labelColor
         let partial = [planRate, tokenRate].compactMap { $0 }.contains { $0.observedSeconds < settings.lookback }
         observationLabel.stringValue = l.text("last") + " \(settings.intervalValue) " + l.unit(settings.intervalUnit, short: true) + (partial ? " · " + l.text("estimate") : "")
@@ -424,7 +425,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let tokenFreshness = tokenSource.map { healthTitle($0.health) } ?? l.text("unavailable")
         let detail = "\(valueLabel.stringValue) · \(item.map { title(for: $0) } ?? "Codex")\n\(l.text("reset")): \(resetDate)\n\(rateLabel.stringValue)\n\(tokenLabel.stringValue)\n\(observationLabel.stringValue)\n\(l.text("updated")): \(updated) · \(sourceState) · \(diagnosticAge(selectedSource?.ageSeconds))\n\(l.text("sourceCodexTokens")): \(tokenFreshness) · \(diagnosticAge(tokenSource?.ageSeconds))" + (sourceError.map { "\n"+l.text($0) } ?? "")
         panel.contentView?.toolTip = detail; valueLabel.toolTip = detail; resetLabel.toolTip = detail
-        rateLabel.toolTip = detail + "\n" + l.text("quotaHelp") + observedDetail(planRate)
+        rateLabel.toolTip = detail + forecastDetail(forecast, now: now) + "\n" + l.text("quotaHelp") + observedDetail(planRate)
         tokenLabel.toolTip = detail + "\n" + l.text("tokensHelp") + observedDetail(tokenRate)
         status?.button?.toolTip = detail
         for (index, extra) in extraItems.enumerated() where index < extraLabels.count {
@@ -437,6 +438,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         lastFreshness = items.map { isStale($0, now: now) || ($0.window.resetsAt.map { $0 <= now } ?? false) } + [stale, tokenStale]
         applyColors()
+    }
+    private func forecastDetail(_ forecast: QuotaForecast?, now: Double) -> String {
+        guard let forecast else { return "" }
+        let value = forecast.exhaustsAt.map { l.text("forecastFullIn") + " " + l.countdown($0 > now ? $0 : now + 1, now: now) }
+            ?? ("≈" + l.number(forecast.projectedUsedAtReset, decimals: 0) + "% " + l.text("forecastAtReset"))
+        return "\n" + l.text("paceForecast") + ": " + value + "\n" + l.text("forecastHelp")
     }
     private func observedDetail(_ rate: Rate?) -> String {
         guard let rate else { return "" }
@@ -1157,6 +1164,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         data["tokenAvailable"] = tokenAvailable
         data["ratePerHour"] = current.flatMap { (isStale($0, now: now) || ($0.window.resetsAt.map { $0 <= now } ?? false)) ? nil : cachedRates[$0.id]?.perHour }
         data["planRatePerHour"] = data["ratePerHour"]
+        let forecast = forecastQuota(used: current?.window.validUsedPercent, perHour: data["ratePerHour"] as? Double, resetsAt: current?.window.resetsAt, now: now)
+        data["forecast"] = forecast.map { value -> [String: Any] in
+            var entry: [String: Any] = ["outlook": value.outlook.rawValue, "projectedUsedAtReset": value.projectedUsedAtReset]
+            if let exhaustsAt = value.exhaustsAt { entry["exhaustsAt"] = exhaustsAt }
+            return entry
+        } ?? NSNull()
         if let bytes = try? JSONSerialization.data(withJSONObject: data, options: [.prettyPrinted, .sortedKeys]) {
             try? bytes.write(to: support.appendingPathComponent("status.json"), options: .atomic)
         }
